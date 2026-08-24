@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type PluginWorkspacePanelProps,
+  useAgent,
   usePaseo,
   useRpc,
   useWorkspace,
@@ -72,7 +73,7 @@ let lastRun = {
   modeId: "full" as string | null,
 };
 
-export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelProps) {
+export function TasksPanel({ theme, layout, workspaceId, host }: PluginWorkspacePanelProps) {
   const workspace = useWorkspace(workspaceId, ({ name, directory }) => ({ name, directory }));
   const paseo = usePaseo();
   const queryClient = useQueryClient();
@@ -423,6 +424,8 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
         backgroundColor: c.accent,
       },
       rowMain: { flex: 1, gap: 3 },
+      runText: { color: c.accent, fontSize: 13, paddingTop: 2 },
+      agentText: { color: c.foregroundMuted, fontSize: 12, paddingTop: 2 },
       titleRow: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6, flexWrap: "wrap" as const },
       rowTitle: { color: c.foreground, fontSize: 16, lineHeight: 22, flexShrink: 1 },
       currentBadge: { color: c.accent, fontSize: 11, fontWeight: "600" as const },
@@ -433,7 +436,6 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
       stepper: { flexDirection: "row" as const, gap: 4, paddingTop: 1 },
       step: { paddingHorizontal: 6, paddingVertical: 2 },
       stepText: { color: c.foregroundMuted, fontSize: 16 },
-      runText: { color: c.accent, fontSize: 13, paddingTop: 2 },
       undoBar: {
         flexDirection: "row" as const,
         alignItems: "center" as const,
@@ -479,6 +481,8 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
         placeholderColor={withAlpha(c.foreground, 0.38)}
         workspaceId={workspaceId}
         cwd={workspace?.directory ?? null}
+        hostId={host.id}
+        platform={layout.platform}
         readImage={readImage}
         busy={addImageMut.isPending || updateMut.isPending || removeMut.isPending || executingId === selected.id}
         error={pickError ?? asMessage(addImageMut.error) ?? asMessage(updateMut.error) ?? asMessage(removeMut.error)}
@@ -588,6 +592,14 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
             >
               <Text style={styles.runText}>{executingId === task.id ? "执行中…" : "执行"}</Text>
             </Pressable>
+            {task.lastAgentId ? (
+              <TaskAgentLink
+                agentId={task.lastAgentId}
+                hostId={host.id}
+                platform={layout.platform}
+                color={c.foregroundMuted}
+              />
+            ) : null}
             {compact ? (
               <View style={styles.stepper}>
                 <Pressable accessibilityRole="button" style={styles.step} onPress={() => move(task.id, "up")}>
@@ -1192,6 +1204,8 @@ function TaskDetail({
   placeholderColor,
   workspaceId,
   cwd,
+  hostId,
+  platform,
   readImage,
   onBack,
   onSave,
@@ -1210,6 +1224,8 @@ function TaskDetail({
   placeholderColor: string;
   workspaceId: string;
   cwd: string | null;
+  hostId: string;
+  platform: PluginWorkspacePanelProps["layout"]["platform"];
   readImage: (input: { workspaceId: string; taskId: string; imageId: string }) => Promise<{
     mime: "image/png" | "image/jpeg" | "image/webp";
     dataBase64: string;
@@ -1417,6 +1433,14 @@ function TaskDetail({
             });
           }}
         />
+        {task.lastAgentId ? (
+          <TaskAgentLink
+            agentId={task.lastAgentId}
+            hostId={hostId}
+            platform={platform}
+            color={c.accent}
+          />
+        ) : null}
         <Text style={styles.section}>图片 {task.images.length}/3</Text>
         <View style={styles.thumbs}>
           {task.images.map((image) => {
@@ -1600,4 +1624,48 @@ function relativeTime(iso: string, now = Date.now()): string {
   const month = Math.floor(day / 30);
   if (month < 12) return `${month} 个月前`;
   return `${Math.floor(day / 365)} 年前`;
+}
+
+function agentStatusLabel(status: string | undefined): string {
+  if (status === "running" || status === "initializing") return "执行中";
+  if (status === "error") return "出错";
+  if (status === "closed") return "已关闭";
+  if (status === "idle") return "对话";
+  return "对话";
+}
+
+function openAgentConversation(
+  hostId: string,
+  agentId: string,
+  platform: PluginWorkspacePanelProps["layout"]["platform"],
+) {
+  if (typeof window === "undefined") return;
+  const path = `/h/${hostId}/agent/${agentId}`;
+  window.location.assign(platform === "web" ? path : `paseo://h/${hostId}/agent/${agentId}`);
+}
+
+function TaskAgentLink({
+  agentId,
+  hostId,
+  platform,
+  color,
+}: {
+  agentId: string;
+  hostId: string;
+  platform: PluginWorkspacePanelProps["layout"]["platform"];
+  color: string;
+}) {
+  const agent = useAgent(agentId, ({ status, title }) => ({ status, title }));
+  return (
+    <Pressable
+      accessibilityRole="link"
+      accessibilityLabel="打开对话"
+      onPress={() => openAgentConversation(hostId, agentId, platform)}
+    >
+      <Text style={{ color, fontSize: 12, paddingTop: 2 }} numberOfLines={1}>
+        {agentStatusLabel(agent?.status)}
+        {agent?.title ? ` · ${agent.title}` : ""}
+      </Text>
+    </Pressable>
+  );
 }
