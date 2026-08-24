@@ -25,11 +25,12 @@ import {
   updateTaskRpc,
   type PublicTask,
 } from "./board.shared";
+import { prepareComposerSubmission, type ComposerImagePayload, type ComposerSubmission } from "./composer-draft";
 import { useWebReorder } from "./reorder.client";
 
 type Screen = { name: "list" } | { name: "task"; taskId: string };
 type BoardData = { projectId: string; tasks: PublicTask[] };
-type CreateInput = { title?: string };
+type CreateInput = { title?: string; body?: string };
 type StatusInput = { taskId: string; status: "open" | "done" };
 type UndoDone = { taskId: string; title: string };
 
@@ -51,13 +52,10 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
   const removeImage = useRpc(removeImageRpc);
   const readImage = useRpc(readImageRpc);
   const [screen, setScreen] = useState<Screen>({ name: "list" });
-  const [draft, setDraft] = useState("");
   const [showDone, setShowDone] = useState(false);
   const [pickError, setPickError] = useState<string | null>(null);
   const [undo, setUndo] = useState<UndoDone | null>(null);
-  const draftRef = useRef<TextInput>(null);
   const undoTimerRef = useRef<TimerId>(0);
-  const pasteLockRef = useRef(false);
   const compact = layout.compact;
   const webDrag = layout.platform === "web" && !compact;
   const boardKey = [BOARD_KEY, workspaceId] as const;
@@ -84,7 +82,7 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
       if (previous) {
         queryClient.setQueryData<BoardData>(boardKey, {
           ...previous,
-          tasks: [...previous.tasks, optimisticTask(previous.tasks, input.title, tempId)],
+          tasks: [...previous.tasks, optimisticTask(previous.tasks, input, tempId)],
         });
       }
       return { previous, tempId };
@@ -218,13 +216,6 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
     };
   }, []);
 
-  const submitDraft = () => {
-    const title = draft.trim();
-    if (!title) return;
-    setDraft("");
-    createMut.mutate({ title });
-    draftRef.current?.focus();
-  };
 
   const completeTask = (task: PublicTask) => {
     armUndo(task);
@@ -258,43 +249,26 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
     }
   };
 
-  const createFromClipboard = async (files: File[]) => {
-    const picked = files.slice(0, 3);
-    if (picked.length === 0 || pasteLockRef.current) return;
-    pasteLockRef.current = true;
-    try {
-      setPickError(null);
-      const created = await createMut.mutateAsync({ title: clockLabel("截图") });
-      await attachFiles(created.task.id, await Promise.all(picked.map(fileToPayload)));
-    } catch (error) {
-      showError(error);
-    } finally {
-      pasteLockRef.current = false;
+  const submitComposer = async (submission: ComposerSubmission): Promise<{ warning?: string }> => {
+    setPickError(null);
+    const created = await createMut.mutateAsync(submission.create);
+    let failedImages = 0;
+    for (const image of submission.images) {
+      try {
+        await addImageMut.mutateAsync({
+          taskId: created.task.id,
+          mime: image.mime,
+          dataBase64: image.dataBase64,
+        });
+      } catch {
+        failedImages += 1;
+      }
     }
+    if (failedImages === 0) return {};
+    const warning = `任务已创建，${failedImages} 张图片上传失败`;
+    setPickError(warning);
+    return { warning };
   };
-
-  const onListPaste = (event: { nativeEvent?: { clipboardData?: DataTransfer }; preventDefault?: () => void }) => {
-    const files = clipboardFiles(event.nativeEvent?.clipboardData);
-    if (files.length === 0) return;
-    event.preventDefault?.();
-    void createFromClipboard(files);
-  };
-
-  const createFromClipboardRef = useRef(createFromClipboard);
-  createFromClipboardRef.current = createFromClipboard;
-
-  useEffect(() => {
-    if (typeof document === "undefined" || screen.name !== "list") return;
-    const onPaste = (event: Event) => {
-      const clip = "clipboardData" in event ? (event as ClipboardEvent).clipboardData : null;
-      const files = clipboardFiles(clip ?? undefined);
-      if (files.length === 0) return;
-      event.preventDefault();
-      void createFromClipboardRef.current(files);
-    };
-    document.addEventListener("paste", onPaste);
-    return () => document.removeEventListener("paste", onPaste);
-  }, [screen.name]);
 
   const c = theme.colors;
   const styles = useMemo(
@@ -437,8 +411,6 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
         style={styles.list}
         contentContainerStyle={styles.listBody}
         keyboardShouldPersistTaps="handled"
-        // @ts-expect-error web paste
-        onPaste={onListPaste}
       >
         {visibleOpen.length === 0 && !boardQuery.isLoading ? (
           <View style={styles.empty}>
@@ -574,29 +546,269 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
         </View>
       ) : null}
 
-      {screen.name === "list" ? (
-        <View style={styles.composer}>
-          <TextInput
-            ref={draftRef}
-            value={draft}
-            onChangeText={setDraft}
-            onSubmitEditing={submitDraft}
-            blurOnSubmit={false}
-            returnKeyType="done"
-            placeholder="添加任务"
-            placeholderTextColor={c.foregroundMuted}
-            style={styles.composerInput}
-          />
-          <Pressable
-            accessibilityRole="button"
-            style={styles.addBtn}
-            onPress={submitDraft}
-            disabled={!draft.trim()}
-          >
-            <Text style={styles.addBtnText}>添加</Text>
-          </Pressable>
+      <TaskComposer
+        theme={theme}
+        compact={compact}
+        submitting={createMut.isPending || addImageMut.isPending}
+        onSubmit={submitComposer}
+      />
+    </View>
+  );
+}
+
+function TaskComposer({
+  theme,
+  compact,
+  submitting,
+  onSubmit,
+}: {
+  theme: PluginWorkspacePanelProps["theme"];
+  compact: boolean;
+  submitting: boolean;
+  onSubmit: (submission: ComposerSubmission) => Promise<{ warning?: string }>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [images, setImages] = useState<ComposerImagePayload[]>([]);
+  const [localSubmitting, setLocalSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const titleRef = useRef<TextInput>(null);
+  const submitRef = useRef<() => void>(() => {});
+  const escapeArmedRef = useRef(false);
+  const c = theme.colors;
+  const busy = submitting || localSubmitting;
+  const hasDraft = Boolean(title.trim() || body.trim() || images.length);
+
+  const addImages = async (payloads: ComposerImagePayload[]) => {
+    const allowed = payloads.filter(
+      (image) => image.mime === "image/png" || image.mime === "image/jpeg" || image.mime === "image/webp",
+    );
+    if (allowed.length === 0) return;
+    setExpanded(true);
+    setImages((current) => [...current, ...allowed].slice(0, 3));
+    setError(null);
+    setTimeout(() => titleRef.current?.focus(), 0);
+  };
+
+  const submit = async () => {
+    if (busy) return;
+    const submission = prepareComposerSubmission({ title, body, images });
+    if (!submission) return;
+    setLocalSubmitting(true);
+    setError(null);
+    try {
+      const result = await onSubmit(submission);
+      setTitle("");
+      setBody("");
+      setImages([]);
+      setExpanded(true);
+      escapeArmedRef.current = false;
+      setError(result.warning ?? null);
+      setTimeout(() => titleRef.current?.focus(), 0);
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : String(submitError));
+    } finally {
+      setLocalSubmitting(false);
+    }
+  };
+  submitRef.current = () => void submit();
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const onPaste = (event: Event) => {
+      const clip = "clipboardData" in event ? (event as ClipboardEvent).clipboardData : null;
+      const files = clipboardFiles(clip ?? undefined);
+      if (files.length === 0) return;
+      event.preventDefault();
+      void Promise.all(files.slice(0, 3).map(fileToPayload)).then(addImages);
+    };
+    document.addEventListener("paste", onPaste);
+    return () => document.removeEventListener("paste", onPaste);
+  }, []);
+
+  useEffect(() => {
+    if (!expanded || typeof document === "undefined") return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        submitRef.current();
+        return;
+      }
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      if (hasDraft && !escapeArmedRef.current) {
+        escapeArmedRef.current = true;
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        return;
+      }
+      setExpanded(false);
+      escapeArmedRef.current = false;
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [expanded, hasDraft]);
+
+  const styles = {
+    collapsed: {
+      minHeight: 48,
+      paddingHorizontal: compact ? 16 : 20,
+      borderTopWidth: 1,
+      borderTopColor: c.foregroundMuted,
+      justifyContent: "center" as const,
+    },
+    collapsedText: { color: c.foregroundMuted, fontSize: 16 },
+    wrap: {
+      paddingHorizontal: compact ? 12 : 16,
+      paddingVertical: 10,
+      borderTopWidth: 1,
+      borderTopColor: c.foregroundMuted,
+      backgroundColor: c.surface0,
+    },
+    card: {
+      borderWidth: 1,
+      borderColor: c.foregroundMuted,
+      borderRadius: 10,
+      padding: compact ? 10 : 12,
+      gap: 8,
+    },
+    title: { color: c.foreground, fontSize: 16, fontWeight: "600" as const, paddingVertical: 4 },
+    body: {
+      color: c.foreground,
+      fontSize: 14,
+      lineHeight: 20,
+      minHeight: 64,
+      textAlignVertical: "top" as const,
+      paddingVertical: 4,
+    },
+    thumbs: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 8 },
+    thumbWrap: { width: 58, gap: 2 },
+    thumb: { width: 58, height: 58, borderRadius: 7, backgroundColor: c.foregroundMuted },
+    removeImage: { color: c.statusDanger, fontSize: 11, textAlign: "center" as const },
+    footer: {
+      flexDirection: "row" as const,
+      alignItems: "center" as const,
+      justifyContent: "space-between" as const,
+      gap: 8,
+      minHeight: compact ? 44 : 36,
+    },
+    tools: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6 },
+    imageButton: { minHeight: compact ? 44 : 34, justifyContent: "center" as const, paddingHorizontal: 6 },
+    imageButtonText: { color: c.foregroundMuted, fontSize: 13 },
+    actions: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6 },
+    cancel: {
+      minHeight: compact ? 44 : 34,
+      justifyContent: "center" as const,
+      paddingHorizontal: compact ? 10 : 8,
+    },
+    cancelText: { color: c.foregroundMuted, fontSize: 14 },
+    add: {
+      minHeight: compact ? 44 : 34,
+      justifyContent: "center" as const,
+      paddingHorizontal: 12,
+      borderRadius: 8,
+      backgroundColor: c.accent,
+      opacity: !hasDraft || busy ? 0.55 : 1,
+    },
+    addText: { color: c.accentForeground, fontSize: 14, fontWeight: "600" as const },
+    error: { color: c.statusDanger, fontSize: 12 },
+  };
+
+  if (!expanded) {
+    return (
+      <Pressable
+        accessibilityRole="button"
+        style={styles.collapsed}
+        onPress={() => {
+          setExpanded(true);
+          setTimeout(() => titleRef.current?.focus(), 0);
+        }}
+      >
+        <Text style={styles.collapsedText}>＋ 添加任务</Text>
+      </Pressable>
+    );
+  }
+
+  return (
+    <View style={styles.wrap}>
+      <View style={styles.card}>
+        <TextInput
+          ref={titleRef}
+          value={title}
+          onChangeText={(value) => {
+            escapeArmedRef.current = false;
+            setTitle(value);
+          }}
+          onSubmitEditing={submit}
+          blurOnSubmit={false}
+          returnKeyType="done"
+          placeholder="任务标题"
+          placeholderTextColor={c.foregroundMuted}
+          style={styles.title}
+          autoFocus
+        />
+        <TextInput
+          value={body}
+          onChangeText={(value) => {
+            escapeArmedRef.current = false;
+            setBody(value);
+          }}
+          multiline
+          placeholder="备注，也可以是一段完整 prompt"
+          placeholderTextColor={c.foregroundMuted}
+          style={styles.body}
+        />
+        {images.length > 0 ? (
+          <View style={styles.thumbs}>
+            {images.map((image, index) => (
+              <View key={`${image.mime}-${index}`} style={styles.thumbWrap}>
+                <Image source={{ uri: `data:${image.mime};base64,${image.dataBase64}` }} style={styles.thumb} />
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => setImages((current) => current.filter((_, currentIndex) => currentIndex !== index))}
+                >
+                  <Text style={styles.removeImage}>移除</Text>
+                </Pressable>
+              </View>
+            ))}
+          </View>
+        ) : null}
+        <View style={styles.footer}>
+          <View style={styles.tools}>
+            <Pressable
+              accessibilityRole="button"
+              style={styles.imageButton}
+              disabled={images.length >= 3 || busy}
+              onPress={async () => {
+                try {
+                  await addImages(await pickLocalImages());
+                } catch (pickFailure) {
+                  if (pickFailure instanceof Error && pickFailure.message === "已取消") return;
+                  setError(pickFailure instanceof Error ? pickFailure.message : String(pickFailure));
+                }
+              }}
+            >
+              <Text style={styles.imageButtonText}>＋ 图片 {images.length}/3</Text>
+            </Pressable>
+          </View>
+          <View style={styles.actions}>
+            <Pressable
+              accessibilityRole="button"
+              style={styles.cancel}
+              onPress={() => {
+                setExpanded(false);
+                escapeArmedRef.current = false;
+              }}
+            >
+              <Text style={styles.cancelText}>取消</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" style={styles.add} disabled={!hasDraft || busy} onPress={submit}>
+              <Text style={styles.addText}>{busy ? "添加中…" : "添加任务"}</Text>
+            </Pressable>
+          </View>
         </View>
-      ) : null}
+        {error ? <Text style={styles.error}>{error}</Text> : null}
+      </View>
     </View>
   );
 }
@@ -844,7 +1056,7 @@ function clipboardFiles(data: DataTransfer | undefined): File[] {
   return fromItems;
 }
 
-async function pickLocalImages(): Promise<Array<{ mime: string; dataBase64: string }>> {
+async function pickLocalImages(): Promise<ComposerImagePayload[]> {
   if (typeof document === "undefined") {
     throw new Error("当前端不能选文件，请在电脑上添加图片。");
   }
@@ -860,14 +1072,17 @@ async function pickLocalImages(): Promise<Array<{ mime: string; dataBase64: stri
   return Promise.all(files.map(fileToPayload));
 }
 
-async function fileToPayload(file: File): Promise<{ mime: string; dataBase64: string }> {
+async function fileToPayload(file: File): Promise<ComposerImagePayload> {
+  if (file.type !== "image/png" && file.type !== "image/jpeg" && file.type !== "image/webp") {
+    throw new Error("只支持 PNG、JPEG 和 WebP 图片");
+  }
   const dataUrl = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(file);
   });
-  return { mime: file.type || "image/png", dataBase64: dataUrl.slice(dataUrl.indexOf(",") + 1) };
+  return { mime: file.type, dataBase64: dataUrl.slice(dataUrl.indexOf(",") + 1) };
 }
 
 function clockLabel(prefix: string): string {
@@ -887,12 +1102,13 @@ function nextOpenRank(tasks: PublicTask[]): number {
   return ranks.length === 0 ? 0 : Math.max(...ranks) + 1;
 }
 
-function optimisticTask(tasks: PublicTask[], title: string | undefined, id: string): PublicTask {
+function optimisticTask(tasks: PublicTask[], input: CreateInput, id: string): PublicTask {
   const now = new Date().toISOString();
+  const firstBodyLine = input.body?.trim().split("\n")[0]?.trim() ?? "";
   return {
     id,
-    title: title?.trim() || clockLabel("任务"),
-    body: "",
+    title: input.title?.trim() || firstBodyLine.slice(0, 40) || clockLabel("任务"),
+    body: input.body ?? "",
     status: "open",
     openRank: nextOpenRank(tasks),
     images: [],
