@@ -39,6 +39,7 @@ import {
   type CatalogPack,
 } from "./paseo-catalog";
 import { useWebReorder } from "./reorder.client";
+import { RunPicker, useRunnableCatalog } from "./run-picker.client";
 
 type Screen = { name: "list" } | { name: "task"; taskId: string };
 type BoardData = { projectId: string; tasks: PublicTask[] };
@@ -141,8 +142,17 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
   });
 
   const updateMut = useMutation({
-    mutationFn: (input: { taskId: string; title?: string; body?: string }) =>
-      updateTask({ workspaceId, ...input }),
+    mutationFn: (
+      input: {
+        taskId: string;
+        title?: string;
+        body?: string;
+        provider?: string | null;
+        model?: string | null;
+        thinkingOptionId?: string | null;
+        modeId?: string | null;
+      },
+    ) => updateTask({ workspaceId, ...input }),
     onSuccess: invalidate,
     onError: showError,
   });
@@ -468,6 +478,7 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
         compact={compact}
         placeholderColor={withAlpha(c.foreground, 0.38)}
         workspaceId={workspaceId}
+        cwd={workspace?.directory ?? null}
         readImage={readImage}
         busy={addImageMut.isPending || updateMut.isPending || removeMut.isPending || executingId === selected.id}
         error={pickError ?? asMessage(addImageMut.error) ?? asMessage(updateMut.error) ?? asMessage(removeMut.error)}
@@ -1180,6 +1191,7 @@ function TaskDetail({
   compact,
   placeholderColor,
   workspaceId,
+  cwd,
   readImage,
   onBack,
   onSave,
@@ -1197,25 +1209,47 @@ function TaskDetail({
   compact: boolean;
   placeholderColor: string;
   workspaceId: string;
+  cwd: string | null;
   readImage: (input: { workspaceId: string; taskId: string; imageId: string }) => Promise<{
     mime: "image/png" | "image/jpeg" | "image/webp";
     dataBase64: string;
   }>;
   onBack: () => void;
-  onSave: (patch: { title?: string; body?: string }) => void;
+  onSave: (patch: {
+    title?: string;
+    body?: string;
+    provider?: string | null;
+    model?: string | null;
+    thinkingOptionId?: string | null;
+    modeId?: string | null;
+  }) => void;
   onStatus: (status: "open" | "done") => void;
   onRemove: () => void;
-  onExecute: (draft: { title: string; body: string }) => void;
+  onExecute: (draft: {
+    title: string;
+    body: string;
+    provider: string | null;
+    model: string | null;
+    thinkingOptionId: string | null;
+    modeId: string | null;
+  }) => void;
   onPick: () => void;
   onPaste: (files: Array<{ mime: string; dataBase64: string }>) => void;
   onRemoveImage: (imageId: string) => void;
   busy: boolean;
   error?: string | null;
 }) {
+  const catalog = useRunnableCatalog(cwd);
   const [title, setTitle] = useState(task.title);
   const [body, setBody] = useState(task.body);
   const [full, setFull] = useState<Record<string, string>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [run, setRun] = useState({
+    provider: task.provider,
+    model: task.model,
+    thinkingOptionId: task.thinkingOptionId,
+    modeId: task.modeId,
+  });
   const titleRef = useRef(title);
   const bodyRef = useRef(body);
   const taskRef = useRef(task);
@@ -1244,7 +1278,13 @@ function TaskDetail({
     setTitle(task.title);
     setBody(task.body);
     lastSentRef.current = { title: task.title, body: task.body };
-  }, [task.id, task.title, task.body]);
+    setRun({
+      provider: task.provider,
+      model: task.model,
+      thinkingOptionId: task.thinkingOptionId,
+      modeId: task.modeId,
+    });
+  }, [task.id, task.title, task.body, task.provider, task.model, task.thinkingOptionId, task.modeId]);
 
   useEffect(() => {
     return () => {
@@ -1357,6 +1397,26 @@ function TaskDetail({
           placeholderTextColor={placeholderColor}
           underlineColorAndroid="transparent"
         />
+        <Text style={styles.section}>模型</Text>
+        <RunPicker
+          theme={theme}
+          catalog={catalog}
+          selection={run}
+          onChange={(next) => {
+            setRun({
+              provider: next.provider ?? null,
+              model: next.model ?? null,
+              thinkingOptionId: next.thinkingOptionId ?? null,
+              modeId: next.modeId ?? null,
+            });
+            onSave({
+              provider: next.provider ?? null,
+              model: next.model ?? null,
+              thinkingOptionId: next.thinkingOptionId ?? null,
+              modeId: next.modeId ?? null,
+            });
+          }}
+        />
         <Text style={styles.section}>图片 {task.images.length}/3</Text>
         <View style={styles.thumbs}>
           {task.images.map((image) => {
@@ -1380,7 +1440,7 @@ function TaskDetail({
             disabled={busy}
             onPress={() => {
               flush();
-              onExecute({ title: titleRef.current, body: bodyRef.current });
+              onExecute({ title: titleRef.current, body: bodyRef.current, ...run });
             }}
           >
             <Text style={styles.buttonText}>{busy ? "处理中…" : "执行"}</Text>
