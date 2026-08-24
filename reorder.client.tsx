@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type DragState = {
   id: string;
@@ -11,9 +11,7 @@ export function useWebReorder(enabled: boolean, orderedIds: string[], onCommit: 
   const idsRef = useRef(orderedIds);
   idsRef.current = orderedIds;
 
-  const previewIds = drag
-    ? moveId(orderedIds, drag.from, drag.over)
-    : orderedIds;
+  const previewIds = drag ? moveId(orderedIds, drag.from, drag.over) : orderedIds;
 
   const start = useCallback(
     (id: string) => {
@@ -42,6 +40,11 @@ export function useWebReorder(enabled: boolean, orderedIds: string[], onCommit: 
       return null;
     });
   }, [onCommit]);
+  useEffect(() => {
+    if (!enabled || typeof window === "undefined") return;
+    window.addEventListener("pointerup", end);
+    return () => window.removeEventListener("pointerup", end);
+  }, [enabled, end]);
 
   return { previewIds, draggingId: drag?.id ?? null, start, over, end };
 }
