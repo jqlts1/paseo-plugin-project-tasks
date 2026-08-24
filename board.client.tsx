@@ -649,41 +649,58 @@ function TaskComposer({
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [expanded, hasDraft]);
 
+  const line = withAlpha(c.foregroundMuted, 0.28);
+  const field = {
+    borderWidth: 0,
+  };
   const styles = {
     collapsed: {
       minHeight: 48,
       paddingHorizontal: compact ? 16 : 20,
       borderTopWidth: 1,
-      borderTopColor: c.foregroundMuted,
+      borderTopColor: line,
       justifyContent: "center" as const,
     },
     collapsedText: { color: c.foregroundMuted, fontSize: 16 },
     wrap: {
       paddingHorizontal: compact ? 12 : 16,
-      paddingVertical: 10,
+      paddingVertical: 12,
       borderTopWidth: 1,
-      borderTopColor: c.foregroundMuted,
+      borderTopColor: line,
       backgroundColor: c.surface0,
     },
     card: {
       borderWidth: 1,
-      borderColor: c.foregroundMuted,
-      borderRadius: 10,
-      padding: compact ? 10 : 12,
-      gap: 8,
+      borderColor: line,
+      borderRadius: 12,
+      paddingTop: compact ? 10 : 12,
+      paddingHorizontal: compact ? 12 : 14,
+      paddingBottom: compact ? 10 : 12,
+      gap: 6,
+      backgroundColor: c.surface0,
+      boxShadow: "0 8px 24px rgba(0,0,0,0.06)",
     },
-    title: { color: c.foreground, fontSize: 16, fontWeight: "600" as const, paddingVertical: 4 },
+    title: {
+      ...field,
+      color: c.foreground,
+      fontSize: 17,
+      fontWeight: "600" as const,
+      paddingVertical: 6,
+      paddingHorizontal: 0,
+    },
     body: {
+      ...field,
       color: c.foreground,
       fontSize: 14,
-      lineHeight: 20,
-      minHeight: 64,
+      lineHeight: 21,
+      minHeight: 68,
       textAlignVertical: "top" as const,
       paddingVertical: 4,
+      paddingHorizontal: 0,
     },
-    thumbs: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 8 },
+    thumbs: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 8, paddingTop: 4 },
     thumbWrap: { width: 58, gap: 2 },
-    thumb: { width: 58, height: 58, borderRadius: 7, backgroundColor: c.foregroundMuted },
+    thumb: { width: 58, height: 58, borderRadius: 7, backgroundColor: withAlpha(c.foregroundMuted, 0.2) },
     removeImage: { color: c.statusDanger, fontSize: 11, textAlign: "center" as const },
     footer: {
       flexDirection: "row" as const,
@@ -691,9 +708,13 @@ function TaskComposer({
       justifyContent: "space-between" as const,
       gap: 8,
       minHeight: compact ? 44 : 36,
+      marginTop: 4,
+      paddingTop: 10,
+      borderTopWidth: 1,
+      borderTopColor: line,
     },
     tools: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6 },
-    imageButton: { minHeight: compact ? 44 : 34, justifyContent: "center" as const, paddingHorizontal: 6 },
+    imageButton: { minHeight: compact ? 44 : 34, justifyContent: "center" as const, paddingHorizontal: 2 },
     imageButtonText: { color: c.foregroundMuted, fontSize: 13 },
     actions: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6 },
     cancel: {
@@ -705,7 +726,7 @@ function TaskComposer({
     add: {
       minHeight: compact ? 44 : 34,
       justifyContent: "center" as const,
-      paddingHorizontal: 12,
+      paddingHorizontal: 14,
       borderRadius: 8,
       backgroundColor: c.accent,
       opacity: !hasDraft || busy ? 0.55 : 1,
@@ -744,7 +765,8 @@ function TaskComposer({
           returnKeyType="done"
           placeholder="任务标题"
           placeholderTextColor={c.foregroundMuted}
-          style={styles.title}
+          underlineColorAndroid="transparent"
+          style={[styles.title, webNoOutline()]}
           autoFocus
         />
         <TextInput
@@ -756,7 +778,8 @@ function TaskComposer({
           multiline
           placeholder="备注，也可以是一段完整 prompt"
           placeholderTextColor={c.foregroundMuted}
-          style={styles.body}
+          underlineColorAndroid="transparent"
+          style={[styles.body, webNoOutline()]}
         />
         {images.length > 0 ? (
           <View style={styles.thumbs}>
@@ -923,13 +946,20 @@ function TaskDetail({
     },
     back: { color: c.accent, fontSize: 16 },
     body: { flex: 1, paddingHorizontal: compact ? 16 : 20, paddingBottom: 24, gap: 12 },
-    title: { color: c.foreground, fontSize: 22, fontWeight: "600" as const, paddingVertical: 4 },
+    title: {
+      color: c.foreground,
+      fontSize: 22,
+      fontWeight: "600" as const,
+      paddingVertical: 4,
+      borderWidth: 0,
+    },
     notes: {
       color: c.foreground,
       fontSize: 16,
       lineHeight: 24,
       minHeight: 160,
       textAlignVertical: "top" as const,
+      borderWidth: 0,
     },
     section: { color: c.foregroundMuted, fontSize: 13 },
     thumbs: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 10 },
@@ -984,9 +1014,10 @@ function TaskDetail({
             scheduleSave();
           }}
           onBlur={flush}
-          style={styles.title}
+          style={[styles.title, webNoOutline()]}
           placeholder="任务标题"
           placeholderTextColor={placeholderColor}
+          underlineColorAndroid="transparent"
         />
         <TextInput
           value={body}
@@ -996,10 +1027,11 @@ function TaskDetail({
             scheduleSave();
           }}
           onBlur={flush}
-          style={styles.notes}
+          style={[styles.notes, webNoOutline()]}
           multiline
           placeholder="备注，也可以是一段以后要发给 agent 的说明"
           placeholderTextColor={placeholderColor}
+          underlineColorAndroid="transparent"
         />
         <Text style={styles.section}>图片 {task.images.length}/3</Text>
         <View style={styles.thumbs}>
@@ -1083,6 +1115,24 @@ async function fileToPayload(file: File): Promise<ComposerImagePayload> {
     reader.readAsDataURL(file);
   });
   return { mime: file.type, dataBase64: dataUrl.slice(dataUrl.indexOf(",") + 1) };
+}
+
+function webNoOutline(): object {
+  return { outlineWidth: 0, outlineStyle: "none" };
+}
+
+function withAlpha(color: string, alpha: number): string {
+  const hex = color.trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(hex)) {
+    const channel = Math.round(Math.min(1, Math.max(0, alpha)) * 255)
+      .toString(16)
+      .padStart(2, "0");
+    return `${hex}${channel}`;
+  }
+  if (/^#[0-9a-fA-F]{8}$/.test(hex)) {
+    return withAlpha(hex.slice(0, 7), alpha);
+  }
+  return color;
 }
 
 function clockLabel(prefix: string): string {
