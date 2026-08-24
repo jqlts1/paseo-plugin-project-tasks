@@ -47,10 +47,15 @@ type TimerId = number | NodeJS.Timeout;
 const UNDO_MS = 5000;
 const SAVE_DEBOUNCE_MS = 800;
 
+function pressableHovered(state: object): boolean {
+  return "hovered" in state && state.hovered === true;
+}
 type RunModel = {
   provider: string;
+  providerLabel: string;
   id: string;
   label: string;
+  description: string;
   thinkingOptions: { id: string; label: string; isDefault?: boolean }[];
   defaultThinkingOptionId?: string | null;
 };
@@ -71,7 +76,7 @@ let lastRun = {
 };
 
 export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelProps) {
-  const workspace = useWorkspace(workspaceId, ({ name }) => ({ name }));
+  const workspace = useWorkspace(workspaceId, ({ name, directory }) => ({ name, directory }));
   const queryClient = useQueryClient();
   const getBoard = useRpc(getBoardRpc);
   const createTask = useRpc(createTaskRpc);
@@ -566,6 +571,7 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
       <TaskComposer
         theme={theme}
         compact={compact}
+        cwd={workspace?.directory ?? null}
         submitting={createMut.isPending || addImageMut.isPending}
         onSubmit={submitComposer}
       />
@@ -576,11 +582,13 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
 function TaskComposer({
   theme,
   compact,
+  cwd,
   submitting,
   onSubmit,
 }: {
   theme: PluginWorkspacePanelProps["theme"];
   compact: boolean;
+  cwd: string | null;
   submitting: boolean;
   onSubmit: (submission: ComposerSubmission) => Promise<{ warning?: string }>;
 }) {
@@ -598,6 +606,7 @@ function TaskComposer({
   const [thinkingOptionId, setThinkingOptionId] = useState(lastRun.thinkingOptionId);
   const [modeId, setModeId] = useState(lastRun.modeId);
   const [menu, setMenu] = useState<null | "model" | "thinking" | "mode">(null);
+  const [modelQuery, setModelQuery] = useState("");
   const titleRef = useRef<TextInput>(null);
   const submitRef = useRef<() => void>(() => {});
   const escapeArmedRef = useRef(false);
@@ -611,6 +620,14 @@ function TaskComposer({
   const selectedPack = packs.find((pack) => pack.provider === (selectedModel?.provider ?? provider));
   const modes = selectedPack?.modes ?? [];
   const selectedMode = modes.find((item) => item.id === modeId) ?? modes[0];
+  const modelNeedle = modelQuery.trim().toLowerCase();
+  const visibleModels = !modelNeedle
+    ? models
+    : models.filter((item) =>
+        [item.label, item.id, item.provider, item.providerLabel, item.description].some((field) =>
+          field.toLowerCase().includes(modelNeedle),
+        ),
+      );
 
   const applyModel = (item: RunModel, packList: ProviderPack[] = packs) => {
     const pack = packList.find((entry) => entry.provider === item.provider);
@@ -684,39 +701,52 @@ function TaskComposer({
   useEffect(() => {
     if (!expanded) return;
     let cancelled = false;
-    void paseo.providers
-      .snapshot()
-      .then((snap: {
-        entries?: Array<{
-          provider: string;
-          enabled?: boolean;
-          defaultModeId?: string | null;
-          modes?: Array<{ id: string; label?: string }>;
-          models?: Array<{
-            id: string;
-            label: string;
-            isSelectable?: boolean;
-            defaultThinkingOptionId?: string;
-            thinkingOptions?: Array<{ id: string; label: string; isDefault?: boolean }>;
-          }>;
-        }>;
-      }) => {
+    const options = cwd ? { cwd } : undefined;
+    void (async () => {
+      try {
+        const snap =
+          (await paseo.providers.waitForReady(options).catch(() => null)) ??
+          (await paseo.providers.snapshot(options));
         if (cancelled) return;
+        type SnapModel = {
+          id: string;
+          label: string;
+          description?: string;
+          isSelectable?: boolean;
+          defaultThinkingOptionId?: string;
+          thinkingOptions?: Array<{ id: string; label: string; isDefault?: boolean }>;
+        };
         const nextModels: RunModel[] = [];
         const nextPacks: ProviderPack[] = [];
         for (const entry of snap.entries ?? []) {
           if (entry.enabled === false) continue;
+          const providerLabel = entry.label ?? entry.provider;
           nextPacks.push({
             provider: entry.provider,
             defaultModeId: entry.defaultModeId,
-            modes: (entry.modes ?? []).map((mode) => ({ id: mode.id, label: mode.label ?? mode.id })),
+            modes: (entry.modes ?? []).map((mode: { id: string; label?: string }) => ({
+              id: mode.id,
+              label: mode.label ?? mode.id,
+            })),
           });
-          for (const item of entry.models ?? []) {
+          let listed: SnapModel[] = entry.models ?? [];
+          if (listed.length === 0) {
+            try {
+              const extra = await paseo.providers.listModels(entry.provider, options);
+              listed = extra.models ?? [];
+            } catch {
+              listed = [];
+            }
+          }
+          if (cancelled) return;
+          for (const item of listed) {
             if (item.isSelectable === false) continue;
             nextModels.push({
               provider: entry.provider,
+              providerLabel,
               id: item.id,
               label: item.label,
+              description: item.description ?? item.id,
               thinkingOptions: (item.thinkingOptions ?? []).map((option) => ({
                 id: option.id,
                 label: option.label,
@@ -726,6 +756,7 @@ function TaskComposer({
             });
           }
         }
+        if (cancelled) return;
         setModels(nextModels);
         setPacks(nextPacks);
         const preferred =
@@ -733,12 +764,14 @@ function TaskComposer({
           nextModels.find((item) => item.id.includes("grok-4.6")) ??
           nextModels[0];
         if (preferred) applyModel(preferred, nextPacks);
-      })
-      .catch(() => {});
+      } catch {
+        /* keep last catalog */
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [expanded, paseo]);
+  }, [expanded, paseo, cwd]);
 
   useEffect(() => {
     if (!expanded || typeof document === "undefined") return;
@@ -833,16 +866,27 @@ function TaskComposer({
     ghostText: { color: c.foregroundMuted, fontSize: 13 },
     ghostOn: { color: c.foreground, fontSize: 13 },
     menu: {
-      maxHeight: 180,
+      maxHeight: 280,
       borderWidth: 1,
       borderColor: line,
       borderRadius: 10,
       overflow: "hidden" as const,
     },
+    search: {
+      ...field,
+      color: c.foreground,
+      fontSize: 14,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      borderBottomWidth: 1,
+      borderBottomColor: line,
+    },
     menuRow: { paddingHorizontal: 10, paddingVertical: 8 },
+    menuRowHover: { backgroundColor: withAlpha(c.foregroundMuted, 0.14) },
     menuRowOn: { backgroundColor: withAlpha(c.accent, 0.12) },
     menuText: { color: c.foreground, fontSize: 13 },
     menuMuted: { color: c.foregroundMuted, fontSize: 11 },
+    section: { color: c.foregroundMuted, fontSize: 11, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 2 },
     actions: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6 },
     cancel: {
       minHeight: compact ? 44 : 34,
@@ -903,7 +947,7 @@ function TaskComposer({
             setBody(value);
           }}
           multiline
-          placeholder="备注，也可以是一段完整 prompt"
+          placeholder="备注（可选）"
           placeholderTextColor={hint}
           underlineColorAndroid="transparent"
           style={[styles.body, webNoOutline()]}
@@ -943,7 +987,10 @@ function TaskComposer({
             <Pressable
               accessibilityRole="button"
               style={styles.ghost}
-              onPress={() => setMenu((current) => (current === "model" ? null : "model"))}
+              onPress={() => {
+                setModelQuery("");
+                setMenu((current) => (current === "model" ? null : "model"));
+              }}
             >
               <Text style={styles.ghostOn} numberOfLines={1}>
                 {selectedModel?.label ?? model ?? "模型"}
@@ -988,25 +1035,55 @@ function TaskComposer({
           </View>
         </View>
         {menu === "model" ? (
-          <ScrollView style={styles.menu} keyboardShouldPersistTaps="handled">
-            {models.map((item) => (
-              <Pressable
-                key={`${item.provider}:${item.id}`}
-                style={[styles.menuRow, item.id === model ? styles.menuRowOn : null]}
-                onPress={() => applyModel(item)}
-              >
-                <Text style={styles.menuText}>{item.label}</Text>
-                <Text style={styles.menuMuted}>{item.provider}</Text>
-              </Pressable>
-            ))}
-          </ScrollView>
+          <View style={styles.menu}>
+            <TextInput
+              value={modelQuery}
+              onChangeText={setModelQuery}
+              placeholder="搜索模型"
+              placeholderTextColor={hint}
+              underlineColorAndroid="transparent"
+              autoFocus
+              style={[styles.search, webNoOutline()]}
+            />
+            <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 230 }}>
+              {visibleModels.length === 0 ? (
+                <Text style={styles.section}>没有匹配的模型</Text>
+              ) : (
+                visibleModels.map((item, index) => {
+                  const showSection = index === 0 || visibleModels[index - 1]?.provider !== item.provider;
+                  return (
+                    <View key={`${item.provider}:${item.id}`}>
+                      {showSection ? <Text style={styles.section}>{item.providerLabel}</Text> : null}
+                      <Pressable
+                        accessibilityRole="button"
+                        style={(state) => [
+                          styles.menuRow,
+                          pressableHovered(state) ? styles.menuRowHover : null,
+                          item.id === model && item.provider === provider ? styles.menuRowOn : null,
+                        ]}
+                        onPress={() => applyModel(item)}
+                      >
+                        <Text style={styles.menuText}>{item.label}</Text>
+                        <Text style={styles.menuMuted}>{item.description}</Text>
+                      </Pressable>
+                    </View>
+                  );
+                })
+              )}
+            </ScrollView>
+          </View>
         ) : null}
         {menu === "thinking" ? (
           <ScrollView style={styles.menu} keyboardShouldPersistTaps="handled">
             {thinkingOptions.map((option) => (
               <Pressable
                 key={option.id}
-                style={[styles.menuRow, option.id === thinkingOptionId ? styles.menuRowOn : null]}
+                accessibilityRole="button"
+                style={(state) => [
+                  styles.menuRow,
+                  pressableHovered(state) ? styles.menuRowHover : null,
+                  option.id === thinkingOptionId ? styles.menuRowOn : null,
+                ]}
                 onPress={() => {
                   setThinkingOptionId(option.id);
                   setMenu(null);
@@ -1022,7 +1099,12 @@ function TaskComposer({
             {modes.map((item) => (
               <Pressable
                 key={item.id}
-                style={[styles.menuRow, item.id === modeId ? styles.menuRowOn : null]}
+                accessibilityRole="button"
+                style={(state) => [
+                  styles.menuRow,
+                  pressableHovered(state) ? styles.menuRowHover : null,
+                  item.id === modeId ? styles.menuRowOn : null,
+                ]}
                 onPress={() => {
                   setModeId(item.id);
                   setMenu(null);
