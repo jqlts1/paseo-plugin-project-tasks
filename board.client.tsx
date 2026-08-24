@@ -4,7 +4,7 @@ import {
   useRpc,
   useWorkspace,
 } from "@getpaseo/plugin";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Image,
   Pressable,
@@ -28,6 +28,15 @@ import {
 import { useWebReorder } from "./reorder.client";
 
 type Screen = { name: "list" } | { name: "task"; taskId: string };
+type BoardData = { projectId: string; tasks: PublicTask[] };
+type CreateInput = { title?: string };
+type StatusInput = { taskId: string; status: "open" | "done" };
+type UndoDone = { taskId: string; title: string };
+
+const BOARD_KEY = "project-tasks";
+type TimerId = number | NodeJS.Timeout;
+const UNDO_MS = 5000;
+const SAVE_DEBOUNCE_MS = 800;
 
 export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelProps) {
   const workspace = useWorkspace(workspaceId, ({ name }) => ({ name }));
@@ -45,45 +54,118 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
   const [draft, setDraft] = useState("");
   const [showDone, setShowDone] = useState(false);
   const [pickError, setPickError] = useState<string | null>(null);
+  const [undo, setUndo] = useState<UndoDone | null>(null);
+  const draftRef = useRef<TextInput>(null);
+  const undoTimerRef = useRef<TimerId>(0);
+  const pasteLockRef = useRef(false);
   const compact = layout.compact;
   const webDrag = layout.platform === "web" && !compact;
+  const boardKey = [BOARD_KEY, workspaceId] as const;
 
   const boardQuery = useQuery({
-    queryKey: ["project-tasks", workspaceId],
+    queryKey: boardKey,
     queryFn: () => getBoard({ workspaceId }),
   });
 
   const invalidate = useCallback(() => {
-    void queryClient.invalidateQueries({ queryKey: ["project-tasks", workspaceId] });
+    void queryClient.invalidateQueries({ queryKey: boardKey });
   }, [queryClient, workspaceId]);
 
+  const showError = (error: unknown) => {
+    setPickError(error instanceof Error ? error.message : String(error));
+  };
+
   const createMut = useMutation({
-    mutationFn: (title: string) => createTask({ workspaceId, title }),
-    onSuccess: () => {
-      setDraft("");
-      invalidate();
+    mutationFn: (input: CreateInput) => createTask({ workspaceId, ...input }),
+    onMutate: async (input) => {
+      await queryClient.cancelQueries({ queryKey: boardKey });
+      const previous = queryClient.getQueryData<BoardData>(boardKey);
+      const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      if (previous) {
+        queryClient.setQueryData<BoardData>(boardKey, {
+          ...previous,
+          tasks: [...previous.tasks, optimisticTask(previous.tasks, input.title, tempId)],
+        });
+      }
+      return { previous, tempId };
     },
+    onSuccess: (data, _input, ctx) => {
+      queryClient.setQueryData<BoardData>(boardKey, (current) => {
+        if (!current) return current;
+        const withoutTemp = current.tasks.filter((task) => task.id !== ctx?.tempId && task.id !== data.task.id);
+        return { ...current, tasks: [...withoutTemp, data.task] };
+      });
+    },
+    onError: (error, _input, ctx) => {
+      if (ctx?.tempId) {
+        queryClient.setQueryData<BoardData>(boardKey, (current) =>
+          current ? { ...current, tasks: current.tasks.filter((task) => task.id !== ctx.tempId) } : current,
+        );
+      }
+      showError(error);
+    },
+    onSettled: invalidate,
   });
+
   const updateMut = useMutation({
     mutationFn: (input: { taskId: string; title?: string; body?: string }) =>
       updateTask({ workspaceId, ...input }),
     onSuccess: invalidate,
+    onError: showError,
   });
+
   const statusMut = useMutation({
-    mutationFn: (input: { taskId: string; status: "open" | "done" }) =>
-      setStatus({ workspaceId, ...input }),
-    onSuccess: invalidate,
+    mutationFn: (input: StatusInput) => setStatus({ workspaceId, ...input }),
+    onMutate: async (input) => {
+      await queryClient.cancelQueries({ queryKey: boardKey });
+      const previous = queryClient.getQueryData<BoardData>(boardKey);
+      if (previous) {
+        queryClient.setQueryData<BoardData>(boardKey, {
+          ...previous,
+          tasks: previous.tasks.map((task) => applyStatus(previous.tasks, task, input)),
+        });
+      }
+      return { previous };
+    },
+    onError: (error, input, ctx) => {
+      if (ctx?.previous) queryClient.setQueryData(boardKey, ctx.previous);
+      if (input.status === "done") clearUndo();
+      showError(error);
+    },
+    onSettled: invalidate,
   });
+
   const reorderMut = useMutation({
     mutationFn: (orderedIds: string[]) => reorderOpen({ workspaceId, orderedIds }),
-    onSuccess: invalidate,
+    onMutate: async (orderedIds) => {
+      await queryClient.cancelQueries({ queryKey: boardKey });
+      const previous = queryClient.getQueryData<BoardData>(boardKey);
+      if (previous) {
+        const rankById = new Map(orderedIds.map((id, index) => [id, index]));
+        queryClient.setQueryData<BoardData>(boardKey, {
+          ...previous,
+          tasks: previous.tasks.map((task) => {
+            const rank = rankById.get(task.id);
+            return rank === undefined ? task : { ...task, openRank: rank, updatedAt: new Date().toISOString() };
+          }),
+        });
+      }
+      return { previous };
+    },
+    onError: (error, _ids, ctx) => {
+      if (ctx?.previous) queryClient.setQueryData(boardKey, ctx.previous);
+      showError(error);
+    },
+    onSettled: invalidate,
   });
+
   const removeMut = useMutation({
     mutationFn: (taskId: string) => removeTask({ workspaceId, taskId }),
     onSuccess: () => {
       invalidate();
       setScreen({ name: "list" });
     },
+    onError: showError,
   });
   const addImageMut = useMutation({
     mutationFn: (input: {
@@ -95,11 +177,12 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
       setPickError(null);
       invalidate();
     },
-    onError: (error: Error) => setPickError(error.message),
+    onError: showError,
   });
   const removeImageMut = useMutation({
     mutationFn: (input: { taskId: string; imageId: string }) => removeImage({ workspaceId, ...input }),
     onSuccess: invalidate,
+    onError: showError,
   });
 
   const tasks = boardQuery.data?.tasks ?? [];
@@ -114,10 +197,45 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
     .filter((task): task is PublicTask => Boolean(task));
   const selected = screen.name === "task" ? tasks.find((task) => task.id === screen.taskId) : undefined;
 
+  const clearUndo = () => {
+    clearTimeout(undoTimerRef.current);
+    undoTimerRef.current = 0;
+    setUndo(null);
+  };
+
+  const armUndo = (task: PublicTask) => {
+    clearTimeout(undoTimerRef.current);
+    setUndo({ taskId: task.id, title: task.title });
+    undoTimerRef.current = setTimeout(() => {
+      undoTimerRef.current = 0;
+      setUndo(null);
+    }, UNDO_MS);
+  };
+
+  useEffect(() => {
+    return () => {
+      clearTimeout(undoTimerRef.current);
+    };
+  }, []);
+
   const submitDraft = () => {
     const title = draft.trim();
-    if (!title || createMut.isPending) return;
-    createMut.mutate(title);
+    if (!title) return;
+    setDraft("");
+    createMut.mutate({ title });
+    draftRef.current?.focus();
+  };
+
+  const completeTask = (task: PublicTask) => {
+    armUndo(task);
+    statusMut.mutate({ taskId: task.id, status: "done" });
+  };
+
+  const undoComplete = () => {
+    if (!undo) return;
+    const taskId = undo.taskId;
+    clearUndo();
+    statusMut.mutate({ taskId, status: "open" });
   };
 
   const move = (taskId: string, kind: "up" | "down") => {
@@ -133,12 +251,50 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
   };
 
   const attachFiles = async (taskId: string, files: Array<{ mime: string; dataBase64: string }>) => {
-    const room = 3 - (tasks.find((task) => task.id === taskId)?.images.length ?? 0);
+    const room = 3 - (queryClient.getQueryData<BoardData>(boardKey)?.tasks.find((task) => task.id === taskId)?.images.length ?? 0);
     for (const file of files.slice(0, Math.max(0, room))) {
       if (file.mime !== "image/png" && file.mime !== "image/jpeg" && file.mime !== "image/webp") continue;
       await addImageMut.mutateAsync({ taskId, mime: file.mime, dataBase64: file.dataBase64 });
     }
   };
+
+  const createFromClipboard = async (files: File[]) => {
+    const picked = files.slice(0, 3);
+    if (picked.length === 0 || pasteLockRef.current) return;
+    pasteLockRef.current = true;
+    try {
+      setPickError(null);
+      const created = await createMut.mutateAsync({ title: clockLabel("截图") });
+      await attachFiles(created.task.id, await Promise.all(picked.map(fileToPayload)));
+    } catch (error) {
+      showError(error);
+    } finally {
+      pasteLockRef.current = false;
+    }
+  };
+
+  const onListPaste = (event: { nativeEvent?: { clipboardData?: DataTransfer }; preventDefault?: () => void }) => {
+    const files = clipboardFiles(event.nativeEvent?.clipboardData);
+    if (files.length === 0) return;
+    event.preventDefault?.();
+    void createFromClipboard(files);
+  };
+
+  const createFromClipboardRef = useRef(createFromClipboard);
+  createFromClipboardRef.current = createFromClipboard;
+
+  useEffect(() => {
+    if (typeof document === "undefined" || screen.name !== "list") return;
+    const onPaste = (event: Event) => {
+      const clip = "clipboardData" in event ? (event as ClipboardEvent).clipboardData : null;
+      const files = clipboardFiles(clip ?? undefined);
+      if (files.length === 0) return;
+      event.preventDefault();
+      void createFromClipboardRef.current(files);
+    };
+    document.addEventListener("paste", onPaste);
+    return () => document.removeEventListener("paste", onPaste);
+  }, [screen.name]);
 
   const c = theme.colors;
   const styles = useMemo(
@@ -163,7 +319,10 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
         paddingHorizontal: 8,
         borderRadius: 8,
         gap: 10,
+        borderLeftWidth: 3,
+        borderLeftColor: c.surface0,
       },
+      rowCurrent: { borderLeftColor: c.accent },
       rowDragging: { opacity: 0.45 },
       handle: { width: 18, paddingTop: 3 },
       handleText: { color: c.foregroundMuted, fontSize: 14, letterSpacing: -1 },
@@ -183,7 +342,9 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
         backgroundColor: c.accent,
       },
       rowMain: { flex: 1, gap: 3 },
-      rowTitle: { color: c.foreground, fontSize: 16, lineHeight: 22 },
+      titleRow: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6, flexWrap: "wrap" as const },
+      rowTitle: { color: c.foreground, fontSize: 16, lineHeight: 22, flexShrink: 1 },
+      currentBadge: { color: c.accent, fontSize: 11, fontWeight: "600" as const },
       rowTitleDone: { color: c.foregroundMuted, fontSize: 16, lineHeight: 22, textDecorationLine: "line-through" as const },
       preview: { color: c.foregroundMuted, fontSize: 13, lineHeight: 18 },
       thumbs: { flexDirection: "row" as const, gap: 6, marginTop: 4 },
@@ -191,6 +352,19 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
       stepper: { flexDirection: "row" as const, gap: 4, paddingTop: 1 },
       step: { paddingHorizontal: 6, paddingVertical: 2 },
       stepText: { color: c.foregroundMuted, fontSize: 16 },
+      undoBar: {
+        flexDirection: "row" as const,
+        alignItems: "center" as const,
+        justifyContent: "space-between" as const,
+        gap: 8,
+        paddingHorizontal: compact ? 12 : 16,
+        paddingVertical: 8,
+        borderTopWidth: 1,
+        borderTopColor: c.foregroundMuted,
+        backgroundColor: c.surface0,
+      },
+      undoText: { flex: 1, color: c.foregroundMuted, fontSize: 13 },
+      undoAction: { color: c.accent, fontSize: 13, fontWeight: "600" as const },
       composer: {
         paddingHorizontal: compact ? 12 : 16,
         paddingVertical: 10,
@@ -211,6 +385,8 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
     [c, compact],
   );
 
+  const listError = pickError ?? asMessage(boardQuery.error) ?? asMessage(createMut.error) ?? asMessage(statusMut.error) ?? asMessage(reorderMut.error);
+
   if (screen.name === "task" && selected) {
     return (
       <TaskDetail
@@ -222,11 +398,12 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
         workspaceId={workspaceId}
         readImage={readImage}
         busy={addImageMut.isPending || updateMut.isPending || removeMut.isPending}
-        error={pickError ?? addImageMut.error?.message ?? updateMut.error?.message ?? removeMut.error?.message}
+        error={pickError ?? asMessage(addImageMut.error) ?? asMessage(updateMut.error) ?? asMessage(removeMut.error)}
         onBack={() => setScreen({ name: "list" })}
         onSave={(patch) => updateMut.mutate({ taskId: selected.id, ...patch })}
         onStatus={(status) => {
-          statusMut.mutate({ taskId: selected.id, status });
+          if (status === "done") completeTask(selected);
+          else statusMut.mutate({ taskId: selected.id, status });
           if (status === "done") setScreen({ name: "list" });
         }}
         onRemove={() => removeMut.mutate(selected.id)}
@@ -236,7 +413,7 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
             const files = await pickLocalImages();
             await attachFiles(selected.id, files);
           } catch (error) {
-            setPickError(error instanceof Error ? error.message : String(error));
+            showError(error);
           }
         }}
         onPaste={(files) => void attachFiles(selected.id, files)}
@@ -253,10 +430,16 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
           {workspace?.name ?? "当前工作区"}
           {openTasks.length > 0 ? ` · ${openTasks.length} 项未完成` : ""}
         </Text>
-        {boardQuery.error ? <Text style={styles.error}>{boardQuery.error.message}</Text> : null}
+        {listError ? <Text style={styles.error}>{listError}</Text> : null}
       </View>
 
-      <ScrollView style={styles.list} contentContainerStyle={styles.listBody} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        style={styles.list}
+        contentContainerStyle={styles.listBody}
+        keyboardShouldPersistTaps="handled"
+        // @ts-expect-error web paste
+        onPaste={onListPaste}
+      >
         {visibleOpen.length === 0 && !boardQuery.isLoading ? (
           <View style={styles.empty}>
             <Text style={styles.emptyTitle}>还没有未完成的任务</Text>
@@ -265,11 +448,13 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
         ) : null}
 
         <View nativeID={reorder.listNativeId} style={styles.openList}>
-        {visibleOpen.map((task) => (
+        {visibleOpen.map((task, index) => {
+          const isCurrent = index === 0;
+          return (
           <View
             key={task.id}
             nativeID={reorder.rowNativeId(task.id)}
-            style={[styles.row, reorder.draggingId === task.id ? styles.rowDragging : null]}
+            style={[styles.row, isCurrent ? styles.rowCurrent : null, reorder.draggingId === task.id ? styles.rowDragging : null]}
           >
             {webDrag ? (
               <Pressable
@@ -287,7 +472,7 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
               accessibilityLabel="完成"
               onPress={() => {
                 if (reorder.blocked) return;
-                statusMut.mutate({ taskId: task.id, status: "done" });
+                completeTask(task);
               }}
               style={styles.check}
             />
@@ -299,7 +484,10 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
                 setScreen({ name: "task", taskId: task.id });
               }}
             >
-              <Text style={styles.rowTitle}>{task.title}</Text>
+              <View style={styles.titleRow}>
+                <Text style={styles.rowTitle}>{task.title}</Text>
+                {isCurrent ? <Text style={styles.currentBadge}>当前</Text> : null}
+              </View>
               {task.body.trim() ? (
                 <Text style={styles.preview} numberOfLines={1}>
                   {task.body.trim().split("\n")[0]}
@@ -332,7 +520,8 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
               </View>
             ) : null}
           </View>
-        ))}
+          );
+        })}
         </View>
 
         {doneTasks.length > 0 ? (
@@ -358,6 +547,14 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
                       onPress={() => setScreen({ name: "task", taskId: task.id })}
                     >
                       <Text style={styles.rowTitleDone}>{task.title}</Text>
+                      <Text style={styles.preview} numberOfLines={1}>
+                        {relativeTime(task.completedAt ?? task.updatedAt)}
+                      </Text>
+                      {task.body.trim() ? (
+                        <Text style={styles.preview} numberOfLines={1}>
+                          {task.body.trim().split("\n")[0]}
+                        </Text>
+                      ) : null}
                     </Pressable>
                   </View>
                 ))
@@ -366,13 +563,25 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
         ) : null}
       </ScrollView>
 
+      {undo ? (
+        <View style={styles.undoBar}>
+          <Text style={styles.undoText} numberOfLines={1}>
+            已完成“{undo.title.trim().length <= 18 ? undo.title.trim() : `${undo.title.trim().slice(0, 18)}…`}”
+          </Text>
+          <Pressable accessibilityRole="button" onPress={undoComplete}>
+            <Text style={styles.undoAction}>撤销</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
       {screen.name === "list" ? (
         <View style={styles.composer}>
           <TextInput
+            ref={draftRef}
             value={draft}
             onChangeText={setDraft}
             onSubmitEditing={submitDraft}
-            blurOnSubmit
+            blurOnSubmit={false}
             returnKeyType="done"
             placeholder="添加任务"
             placeholderTextColor={c.foregroundMuted}
@@ -382,9 +591,9 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
             accessibilityRole="button"
             style={styles.addBtn}
             onPress={submitDraft}
-            disabled={!draft.trim() || createMut.isPending}
+            disabled={!draft.trim()}
           >
-            <Text style={styles.addBtnText}>{createMut.isPending ? "…" : "添加"}</Text>
+            <Text style={styles.addBtnText}>添加</Text>
           </Pressable>
         </View>
       ) : null}
@@ -432,24 +641,57 @@ function TaskDetail({
   const [body, setBody] = useState(task.body);
   const [full, setFull] = useState<Record<string, string>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const titleRef = useRef(title);
+  const bodyRef = useRef(body);
+  const taskRef = useRef(task);
+  const onSaveRef = useRef(onSave);
+  const lastSentRef = useRef({ title: task.title, body: task.body });
+  const timerRef = useRef<TimerId>(0);
   const c = theme.colors;
+  titleRef.current = title;
+  bodyRef.current = body;
+  taskRef.current = task;
+  onSaveRef.current = onSave;
+  const flush = useCallback(() => {
+    clearTimeout(timerRef.current);
+    timerRef.current = 0;
+    const current = taskRef.current;
+    const nextTitle = titleRef.current.trim();
+    const sent = lastSentRef.current;
+    const resolvedTitle = nextTitle || current.title;
+    const titleChanged = resolvedTitle !== sent.title && (nextTitle.length > 0 || current.title.length > 0);
+    const bodyChanged = bodyRef.current !== sent.body;
+    if (!titleChanged && !bodyChanged) return;
+    const patch = {
+      ...(titleChanged ? { title: resolvedTitle } : {}),
+      ...(bodyChanged ? { body: bodyRef.current } : {}),
+    };
+    lastSentRef.current = {
+      title: titleChanged ? resolvedTitle : sent.title,
+      body: bodyChanged ? bodyRef.current : sent.body,
+    };
+    onSaveRef.current(patch);
+  }, []);
+
+  const scheduleSave = useCallback(() => {
+    clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
+      timerRef.current = 0;
+      flush();
+    }, SAVE_DEBOUNCE_MS);
+  }, [flush]);
 
   useEffect(() => {
     setTitle(task.title);
     setBody(task.body);
+    lastSentRef.current = { title: task.title, body: task.body };
   }, [task.id, task.title, task.body]);
 
-  const flush = () => {
-    const nextTitle = title.trim();
-    const titleChanged = nextTitle !== task.title && (nextTitle.length > 0 || task.title.length > 0);
-    const bodyChanged = body !== task.body;
-    if (titleChanged || bodyChanged) {
-      onSave({
-        ...(titleChanged ? { title: nextTitle || task.title } : {}),
-        ...(bodyChanged ? { body } : {}),
-      });
-    }
-  };
+  useEffect(() => {
+    return () => {
+      flush();
+    };
+  }, [flush]);
 
   const loadFull = async (imageId: string) => {
     if (full[imageId]) return;
@@ -504,7 +746,10 @@ function TaskDetail({
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          onPress={() => onStatus(task.status === "open" ? "done" : "open")}
+          onPress={() => {
+            flush();
+            onStatus(task.status === "open" ? "done" : "open");
+          }}
         >
           <Text style={styles.back}>{task.status === "open" ? "完成" : "重新打开"}</Text>
         </Pressable>
@@ -521,7 +766,11 @@ function TaskDetail({
       >
         <TextInput
           value={title}
-          onChangeText={setTitle}
+          onChangeText={(value) => {
+            titleRef.current = value;
+            setTitle(value);
+            scheduleSave();
+          }}
           onBlur={flush}
           style={styles.title}
           placeholder="任务标题"
@@ -529,7 +778,11 @@ function TaskDetail({
         />
         <TextInput
           value={body}
-          onChangeText={setBody}
+          onChangeText={(value) => {
+            bodyRef.current = value;
+            setBody(value);
+            scheduleSave();
+          }}
           onBlur={flush}
           style={styles.notes}
           multiline
@@ -615,4 +868,71 @@ async function fileToPayload(file: File): Promise<{ mime: string; dataBase64: st
     reader.readAsDataURL(file);
   });
   return { mime: file.type || "image/png", dataBase64: dataUrl.slice(dataUrl.indexOf(",") + 1) };
+}
+
+function clockLabel(prefix: string): string {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  return `${prefix} ${hh}:${mm}`;
+}
+
+function asMessage(error: unknown): string | null {
+  if (error == null) return null;
+  return error instanceof Error ? error.message : String(error);
+}
+
+function nextOpenRank(tasks: PublicTask[]): number {
+  const ranks = tasks.filter((task) => task.status === "open").map((task) => task.openRank);
+  return ranks.length === 0 ? 0 : Math.max(...ranks) + 1;
+}
+
+function optimisticTask(tasks: PublicTask[], title: string | undefined, id: string): PublicTask {
+  const now = new Date().toISOString();
+  return {
+    id,
+    title: title?.trim() || clockLabel("任务"),
+    body: "",
+    status: "open",
+    openRank: nextOpenRank(tasks),
+    images: [],
+    createdAt: now,
+    updatedAt: now,
+    completedAt: null,
+    lastAgentId: null,
+    runs: [],
+  };
+}
+
+function applyStatus(tasks: PublicTask[], task: PublicTask, input: StatusInput): PublicTask {
+  if (task.id !== input.taskId || task.status === input.status) return task;
+  const now = new Date().toISOString();
+  if (input.status === "done") {
+    return { ...task, status: "done", completedAt: now, updatedAt: now };
+  }
+  const others = tasks.filter((item) => item.status === "open" && item.id !== task.id);
+  return {
+    ...task,
+    status: "open",
+    completedAt: null,
+    openRank: nextOpenRank(others),
+    updatedAt: now,
+  };
+}
+
+
+function relativeTime(iso: string, now = Date.now()): string {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return "";
+  const sec = Math.max(0, Math.round((now - then) / 1000));
+  if (sec < 60) return "刚刚";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} 分钟前`;
+  const hour = Math.floor(min / 60);
+  if (hour < 24) return `${hour} 小时前`;
+  const day = Math.floor(hour / 24);
+  if (day < 30) return `${day} 天前`;
+  const month = Math.floor(day / 30);
+  if (month < 12) return `${month} 个月前`;
+  return `${Math.floor(day / 365)} 年前`;
 }
