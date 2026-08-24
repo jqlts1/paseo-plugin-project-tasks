@@ -27,6 +27,15 @@ import {
   type PublicTask,
 } from "./board.shared";
 import { prepareComposerSubmission, type ComposerImagePayload, type ComposerSubmission } from "./composer-draft";
+import {
+  buildRunnableCatalog,
+  catalogSnapshotFromUnknown,
+  filterCatalogModels,
+  findCatalogModel,
+  reconcileSelection,
+  type CatalogModel,
+  type CatalogPack,
+} from "./paseo-catalog";
 import { useWebReorder } from "./reorder.client";
 
 type Screen = { name: "list" } | { name: "task"; taskId: string };
@@ -50,23 +59,8 @@ const SAVE_DEBOUNCE_MS = 800;
 function pressableHovered(state: object): boolean {
   return "hovered" in state && state.hovered === true;
 }
-type RunModel = {
-  provider: string;
-  providerLabel: string;
-  id: string;
-  label: string;
-  description: string;
-  thinkingOptions: { id: string; label: string; isDefault?: boolean }[];
-  defaultThinkingOptionId?: string | null;
-};
-
-type RunMode = { id: string; label: string };
-
-type ProviderPack = {
-  provider: string;
-  defaultModeId?: string | null;
-  modes: RunMode[];
-};
+type RunModel = CatalogModel;
+type ProviderPack = CatalogPack;
 
 let lastRun = {
   provider: "omp" as string | null,
@@ -614,20 +608,14 @@ function TaskComposer({
   const hint = withAlpha(c.foreground, 0.38);
   const busy = submitting || localSubmitting;
   const hasDraft = Boolean(title.trim() || body.trim() || images.length);
-  const selectedModel =
-    models.find((item) => item.id === model && item.provider === provider) ?? models.find((item) => item.id === model);
+  const selectedModel = findCatalogModel(models, { provider, model });
   const thinkingOptions = selectedModel?.thinkingOptions ?? [];
   const selectedPack = packs.find((pack) => pack.provider === (selectedModel?.provider ?? provider));
   const modes = selectedPack?.modes ?? [];
   const selectedMode = modes.find((item) => item.id === modeId) ?? modes[0];
-  const modelNeedle = modelQuery.trim().toLowerCase();
-  const visibleModels = !modelNeedle
-    ? models
-    : models.filter((item) =>
-        [item.label, item.id, item.provider, item.providerLabel, item.description].some((field) =>
-          field.toLowerCase().includes(modelNeedle),
-        ),
-      );
+  const visibleModels = filterCatalogModels(models, modelQuery);
+  const selectionRef = useRef({ provider, model, thinkingOptionId, modeId });
+  selectionRef.current = { provider, model, thinkingOptionId, modeId };
 
   const applyModel = (item: RunModel, packList: ProviderPack[] = packs) => {
     const pack = packList.find((entry) => entry.provider === item.provider);
@@ -661,6 +649,10 @@ function TaskComposer({
     if (busy) return;
     const submission = prepareComposerSubmission({ title, body, images });
     if (!submission) return;
+    if ((provider || model) && !findCatalogModel(models, { provider, model })) {
+      setError("当前模型已不可用，请重新选择");
+      return;
+    }
     setLocalSubmitting(true);
     setError(null);
     lastRun = { provider, model, thinkingOptionId, modeId };
@@ -699,79 +691,60 @@ function TaskComposer({
   }, []);
 
   useEffect(() => {
-    if (!expanded) return;
     let cancelled = false;
     const options = cwd ? { cwd } : undefined;
+
+    const applySnapshot = (value: unknown) => {
+      if (cancelled) return;
+      const catalog = buildRunnableCatalog(catalogSnapshotFromUnknown(value));
+      setModels(catalog.models);
+      setPacks(catalog.packs);
+      const next = reconcileSelection(catalog, selectionRef.current, lastRun);
+      setProvider(next?.provider ?? null);
+      setModel(next?.model ?? null);
+      setThinkingOptionId(next?.thinkingOptionId ?? null);
+      setModeId(next?.modeId ?? null);
+    };
+
     void (async () => {
       try {
         const snap =
           (await paseo.providers.waitForReady(options).catch(() => null)) ??
           (await paseo.providers.snapshot(options));
         if (cancelled) return;
-        type SnapModel = {
-          id: string;
-          label: string;
-          description?: string;
-          isSelectable?: boolean;
-          defaultThinkingOptionId?: string;
-          thinkingOptions?: Array<{ id: string; label: string; isDefault?: boolean }>;
-        };
-        const nextModels: RunModel[] = [];
-        const nextPacks: ProviderPack[] = [];
-        for (const entry of snap.entries ?? []) {
-          if (entry.enabled === false) continue;
-          const providerLabel = entry.label ?? entry.provider;
-          nextPacks.push({
-            provider: entry.provider,
-            defaultModeId: entry.defaultModeId,
-            modes: (entry.modes ?? []).map((mode: { id: string; label?: string }) => ({
-              id: mode.id,
-              label: mode.label ?? mode.id,
-            })),
-          });
-          let listed: SnapModel[] = entry.models ?? [];
-          if (listed.length === 0) {
-            try {
-              const extra = await paseo.providers.listModels(entry.provider, options);
-              listed = extra.models ?? [];
-            } catch {
-              listed = [];
-            }
+        const parsed = catalogSnapshotFromUnknown(snap);
+        const entries = [];
+        for (const entry of parsed.entries ?? []) {
+          if (entry.status !== "ready") {
+            entries.push(entry);
+            continue;
           }
-          if (cancelled) return;
-          for (const item of listed) {
-            if (item.isSelectable === false) continue;
-            nextModels.push({
-              provider: entry.provider,
-              providerLabel,
-              id: item.id,
-              label: item.label,
-              description: item.description ?? item.id,
-              thinkingOptions: (item.thinkingOptions ?? []).map((option) => ({
-                id: option.id,
-                label: option.label,
-                isDefault: option.isDefault,
-              })),
-              defaultThinkingOptionId: item.defaultThinkingOptionId,
-            });
+          if ((entry.models ?? []).length > 0) {
+            entries.push(entry);
+            continue;
+          }
+          try {
+            const extra = await paseo.providers.listModels(entry.provider, options);
+            entries.push({ ...entry, models: extra.models ?? [] });
+          } catch {
+            entries.push(entry);
           }
         }
-        if (cancelled) return;
-        setModels(nextModels);
-        setPacks(nextPacks);
-        const preferred =
-          nextModels.find((item) => item.id === lastRun.model && item.provider === lastRun.provider) ??
-          nextModels.find((item) => item.id.includes("grok-4.6")) ??
-          nextModels[0];
-        if (preferred) applyModel(preferred, nextPacks);
+        applySnapshot({ entries });
       } catch {
         /* keep last catalog */
       }
     })();
+
+    const unsubscribe = paseo.providers.subscribe((update: unknown) => {
+      applySnapshot(update);
+    });
+
     return () => {
       cancelled = true;
+      unsubscribe();
     };
-  }, [expanded, paseo, cwd]);
+  }, [paseo, cwd]);
 
   useEffect(() => {
     if (!expanded || typeof document === "undefined") return;
@@ -993,7 +966,7 @@ function TaskComposer({
               }}
             >
               <Text style={styles.ghostOn} numberOfLines={1}>
-                {selectedModel?.label ?? model ?? "模型"}
+                {selectedModel?.label ?? (models.length === 0 ? "无可用模型" : "模型")}
               </Text>
             </Pressable>
             {thinkingOptions.length > 0 ? (
