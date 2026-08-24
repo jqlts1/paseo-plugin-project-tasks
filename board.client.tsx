@@ -155,6 +155,7 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
       error: { color: c.statusDanger, fontSize: 13 },
       list: { flex: 1 },
       listBody: { paddingHorizontal: compact ? 12 : 16, paddingBottom: 24, gap: 2 },
+      openList: { gap: 2 },
       row: {
         flexDirection: "row" as const,
         alignItems: "flex-start" as const,
@@ -263,19 +264,19 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
           </View>
         ) : null}
 
+        <View nativeID={reorder.listNativeId} style={styles.openList}>
         {visibleOpen.map((task) => (
           <View
             key={task.id}
+            nativeID={reorder.rowNativeId(task.id)}
             style={[styles.row, reorder.draggingId === task.id ? styles.rowDragging : null]}
-            onPointerEnter={webDrag ? () => reorder.over(task.id) : undefined}
           >
             {webDrag ? (
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="拖动排序"
                 style={styles.handle}
-                onPointerDown={() => reorder.start(task.id)}
-                onPointerUp={reorder.end}
+                onPointerDown={(event) => reorder.start(task.id, event)}
               >
                 <Text style={styles.handleText}>⋮⋮</Text>
               </Pressable>
@@ -284,13 +285,19 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
               accessibilityRole="checkbox"
               accessibilityState={{ checked: false }}
               accessibilityLabel="完成"
-              onPress={() => statusMut.mutate({ taskId: task.id, status: "done" })}
+              onPress={() => {
+                if (reorder.blocked) return;
+                statusMut.mutate({ taskId: task.id, status: "done" });
+              }}
               style={styles.check}
             />
             <Pressable
               accessibilityRole="button"
               style={styles.rowMain}
-              onPress={() => setScreen({ name: "task", taskId: task.id })}
+              onPress={() => {
+                if (reorder.blocked) return;
+                setScreen({ name: "task", taskId: task.id });
+              }}
             >
               <Text style={styles.rowTitle}>{task.title}</Text>
               {task.body.trim() ? (
@@ -326,6 +333,7 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
             ) : null}
           </View>
         ))}
+        </View>
 
         {doneTasks.length > 0 ? (
           <View>
