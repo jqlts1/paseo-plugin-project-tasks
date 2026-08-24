@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type PluginWorkspacePanelProps,
+  usePaseo,
   useRpc,
   useWorkspace,
 } from "@getpaseo/plugin";
@@ -30,7 +31,13 @@ import { useWebReorder } from "./reorder.client";
 
 type Screen = { name: "list" } | { name: "task"; taskId: string };
 type BoardData = { projectId: string; tasks: PublicTask[] };
-type CreateInput = { title?: string; body?: string };
+type CreateInput = {
+  title?: string;
+  body?: string;
+  provider?: string | null;
+  model?: string | null;
+  thinkingOptionId?: string | null;
+};
 type StatusInput = { taskId: string; status: "open" | "done" };
 type UndoDone = { taskId: string; title: string };
 
@@ -38,6 +45,20 @@ const BOARD_KEY = "project-tasks";
 type TimerId = number | NodeJS.Timeout;
 const UNDO_MS = 5000;
 const SAVE_DEBOUNCE_MS = 800;
+
+type RunModel = {
+  provider: string;
+  id: string;
+  label: string;
+  thinkingOptions: { id: string; label: string; isDefault?: boolean }[];
+  defaultThinkingOptionId?: string | null;
+};
+
+let lastRun = {
+  provider: "omp" as string | null,
+  model: "xai-oauth/grok-4.6" as string | null,
+  thinkingOptionId: null as string | null,
+};
 
 export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelProps) {
   const workspace = useWorkspace(workspaceId, ({ name }) => ({ name }));
@@ -368,7 +389,7 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
         task={selected}
         theme={theme}
         compact={compact}
-        placeholderColor={c.foregroundMuted}
+        placeholderColor={withAlpha(c.foreground, 0.38)}
         workspaceId={workspaceId}
         readImage={readImage}
         busy={addImageMut.isPending || updateMut.isPending || removeMut.isPending}
@@ -465,21 +486,7 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
                   {task.body.trim().split("\n")[0]}
                 </Text>
               ) : null}
-              {task.images.length > 0 ? (
-                <View style={styles.thumbs}>
-                  {task.images.map((image) =>
-                    image.thumbBase64 ? (
-                      <Image
-                        key={image.id}
-                        source={{ uri: `data:${image.mime};base64,${image.thumbBase64}` }}
-                        style={styles.thumb}
-                      />
-                    ) : (
-                      <View key={image.id} style={styles.thumb} />
-                    ),
-                  )}
-                </View>
-              ) : null}
+              {task.images.length > 0 ? <Text style={styles.preview}>图 {task.images.length}</Text> : null}
             </Pressable>
             {compact ? (
               <View style={styles.stepper}>
@@ -567,18 +574,27 @@ function TaskComposer({
   submitting: boolean;
   onSubmit: (submission: ComposerSubmission) => Promise<{ warning?: string }>;
 }) {
+  const paseo = usePaseo();
   const [expanded, setExpanded] = useState(false);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [images, setImages] = useState<ComposerImagePayload[]>([]);
   const [localSubmitting, setLocalSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [models, setModels] = useState<RunModel[]>([]);
+  const [provider, setProvider] = useState(lastRun.provider);
+  const [model, setModel] = useState(lastRun.model);
+  const [thinkingOptionId, setThinkingOptionId] = useState(lastRun.thinkingOptionId);
+  const [menu, setMenu] = useState<null | "model" | "thinking">(null);
   const titleRef = useRef<TextInput>(null);
   const submitRef = useRef<() => void>(() => {});
   const escapeArmedRef = useRef(false);
   const c = theme.colors;
+  const hint = withAlpha(c.foreground, 0.38);
   const busy = submitting || localSubmitting;
   const hasDraft = Boolean(title.trim() || body.trim() || images.length);
+  const selectedModel = models.find((item) => item.id === model && item.provider === provider) ?? models.find((item) => item.id === model);
+  const thinkingOptions = selectedModel?.thinkingOptions ?? [];
 
   const addImages = async (payloads: ComposerImagePayload[]) => {
     const allowed = payloads.filter(
@@ -597,12 +613,22 @@ function TaskComposer({
     if (!submission) return;
     setLocalSubmitting(true);
     setError(null);
+    lastRun = { provider, model, thinkingOptionId };
     try {
-      const result = await onSubmit(submission);
+      const result = await onSubmit({
+        create: {
+          ...submission.create,
+          provider,
+          model,
+          thinkingOptionId,
+        },
+        images: submission.images,
+      });
       setTitle("");
       setBody("");
       setImages([]);
       setExpanded(true);
+      setMenu(null);
       escapeArmedRef.current = false;
       setError(result.warning ?? null);
       setTimeout(() => titleRef.current?.focus(), 0);
@@ -626,6 +652,62 @@ function TaskComposer({
     document.addEventListener("paste", onPaste);
     return () => document.removeEventListener("paste", onPaste);
   }, []);
+
+  useEffect(() => {
+    if (!expanded) return;
+    let cancelled = false;
+    void paseo.providers
+      .snapshot()
+      .then((snap: { entries?: Array<{
+        provider: string;
+        enabled?: boolean;
+        models?: Array<{
+          id: string;
+          label: string;
+          isSelectable?: boolean;
+          defaultThinkingOptionId?: string;
+          thinkingOptions?: Array<{ id: string; label: string; isDefault?: boolean }>;
+        }>;
+      }> }) => {
+        if (cancelled) return;
+        const next: RunModel[] = [];
+        for (const entry of snap.entries ?? []) {
+          if (entry.enabled === false) continue;
+          for (const item of entry.models ?? []) {
+            if (item.isSelectable === false) continue;
+            next.push({
+              provider: entry.provider,
+              id: item.id,
+              label: item.label,
+              thinkingOptions: (item.thinkingOptions ?? []).map((option) => ({
+                id: option.id,
+                label: option.label,
+                isDefault: option.isDefault,
+              })),
+              defaultThinkingOptionId: item.defaultThinkingOptionId,
+            });
+          }
+        }
+        setModels(next);
+        const preferred =
+          next.find((item) => item.id === lastRun.model && item.provider === lastRun.provider) ??
+          next.find((item) => item.id.includes("grok-4.6")) ??
+          next[0];
+        if (preferred) {
+          setProvider(preferred.provider);
+          setModel(preferred.id);
+          const thinking =
+            lastRun.thinkingOptionId && preferred.thinkingOptions.some((option) => option.id === lastRun.thinkingOptionId)
+              ? lastRun.thinkingOptionId
+              : preferred.defaultThinkingOptionId ?? preferred.thinkingOptions.find((option) => option.isDefault)?.id ?? preferred.thinkingOptions[0]?.id ?? null;
+          setThinkingOptionId(thinking);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [expanded, paseo]);
 
   useEffect(() => {
     if (!expanded || typeof document === "undefined") return;
@@ -713,9 +795,28 @@ function TaskComposer({
       borderTopWidth: 1,
       borderTopColor: line,
     },
-    tools: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6 },
-    imageButton: { minHeight: compact ? 44 : 34, justifyContent: "center" as const, paddingHorizontal: 2 },
+    tools: { flexDirection: "row" as const, alignItems: "center" as const, flexWrap: "wrap" as const, gap: 6, flexShrink: 1 },
+    imageButton: { minHeight: compact ? 44 : 32, justifyContent: "center" as const, paddingHorizontal: 2 },
     imageButtonText: { color: c.foregroundMuted, fontSize: 13 },
+    chip: {
+      minHeight: compact ? 32 : 28,
+      paddingHorizontal: 8,
+      borderRadius: 8,
+      justifyContent: "center" as const,
+      backgroundColor: withAlpha(c.foregroundMuted, 0.12),
+    },
+    chipText: { color: c.foreground, fontSize: 12 },
+    menu: {
+      maxHeight: 180,
+      borderWidth: 1,
+      borderColor: line,
+      borderRadius: 10,
+      overflow: "hidden" as const,
+    },
+    menuRow: { paddingHorizontal: 10, paddingVertical: 8 },
+    menuRowOn: { backgroundColor: withAlpha(c.accent, 0.12) },
+    menuText: { color: c.foreground, fontSize: 13 },
+    menuMuted: { color: c.foregroundMuted, fontSize: 11 },
     actions: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6 },
     cancel: {
       minHeight: compact ? 44 : 34,
@@ -764,7 +865,7 @@ function TaskComposer({
           blurOnSubmit={false}
           returnKeyType="done"
           placeholder="任务标题"
-          placeholderTextColor={c.foregroundMuted}
+          placeholderTextColor={hint}
           underlineColorAndroid="transparent"
           style={[styles.title, webNoOutline()]}
           autoFocus
@@ -777,7 +878,7 @@ function TaskComposer({
           }}
           multiline
           placeholder="备注，也可以是一段完整 prompt"
-          placeholderTextColor={c.foregroundMuted}
+          placeholderTextColor={hint}
           underlineColorAndroid="transparent"
           style={[styles.body, webNoOutline()]}
         />
@@ -813,6 +914,26 @@ function TaskComposer({
             >
               <Text style={styles.imageButtonText}>＋ 图片 {images.length}/3</Text>
             </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              style={styles.chip}
+              onPress={() => setMenu((current) => (current === "model" ? null : "model"))}
+            >
+              <Text style={styles.chipText} numberOfLines={1}>
+                {selectedModel?.label ?? model ?? "选择模型"}
+              </Text>
+            </Pressable>
+            {thinkingOptions.length > 0 ? (
+              <Pressable
+                accessibilityRole="button"
+                style={styles.chip}
+                onPress={() => setMenu((current) => (current === "thinking" ? null : "thinking"))}
+              >
+                <Text style={styles.chipText}>
+                  {thinkingOptions.find((option) => option.id === thinkingOptionId)?.label ?? "思考"}
+                </Text>
+              </Pressable>
+            ) : null}
           </View>
           <View style={styles.actions}>
             <Pressable
@@ -830,6 +951,43 @@ function TaskComposer({
             </Pressable>
           </View>
         </View>
+        {menu === "model" ? (
+          <ScrollView style={styles.menu} keyboardShouldPersistTaps="handled">
+            {models.map((item) => (
+              <Pressable
+                key={`${item.provider}:${item.id}`}
+                style={[styles.menuRow, item.id === model ? styles.menuRowOn : null]}
+                onPress={() => {
+                  setProvider(item.provider);
+                  setModel(item.id);
+                  setThinkingOptionId(
+                    item.defaultThinkingOptionId ?? item.thinkingOptions.find((option) => option.isDefault)?.id ?? item.thinkingOptions[0]?.id ?? null,
+                  );
+                  setMenu(null);
+                }}
+              >
+                <Text style={styles.menuText}>{item.label}</Text>
+                <Text style={styles.menuMuted}>{item.provider}</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        ) : null}
+        {menu === "thinking" ? (
+          <ScrollView style={styles.menu} keyboardShouldPersistTaps="handled">
+            {thinkingOptions.map((option) => (
+              <Pressable
+                key={option.id}
+                style={[styles.menuRow, option.id === thinkingOptionId ? styles.menuRowOn : null]}
+                onPress={() => {
+                  setThinkingOptionId(option.id);
+                  setMenu(null);
+                }}
+              >
+                <Text style={styles.menuText}>{option.label}</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        ) : null}
         {error ? <Text style={styles.error}>{error}</Text> : null}
       </View>
     </View>
@@ -1167,6 +1325,9 @@ function optimisticTask(tasks: PublicTask[], input: CreateInput, id: string): Pu
     completedAt: null,
     lastAgentId: null,
     runs: [],
+    provider: input.provider ?? null,
+    model: input.model ?? null,
+    thinkingOptionId: input.thinkingOptionId ?? null,
   };
 }
 

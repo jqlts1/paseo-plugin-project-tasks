@@ -44,7 +44,13 @@ export async function createTask(
   { paseo }: PluginHandlerContext,
 ) {
   const projectId = await projectIdOf(input.workspaceId, paseo);
-  const task = store.createTask(projectId, input.title, input.body);
+  const task = store.createTask(projectId, {
+    title: input.title,
+    body: input.body,
+    provider: input.provider,
+    model: input.model,
+    thinkingOptionId: input.thinkingOptionId,
+  });
   return { task: publish(projectId, task) };
 }
 
@@ -53,7 +59,13 @@ export async function updateTask(
   { paseo }: PluginHandlerContext,
 ) {
   const projectId = await projectIdOf(input.workspaceId, paseo);
-  const task = store.updateTask(projectId, input.taskId, { title: input.title, body: input.body });
+  const task = store.updateTask(projectId, input.taskId, {
+    title: input.title,
+    body: input.body,
+    provider: input.provider,
+    model: input.model,
+    thinkingOptionId: input.thinkingOptionId,
+  });
   return { task: publish(projectId, task) };
 }
 

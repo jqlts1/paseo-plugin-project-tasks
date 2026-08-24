@@ -87,12 +87,20 @@ function nextOpenRank(tasks: Task[]): number {
   return ranks.length === 0 ? 0 : Math.max(...ranks) + 1;
 }
 
-export function createTask(projectId: string, title?: string, body?: string): Task {
+export type TaskPatch = {
+  title?: string;
+  body?: string;
+  provider?: string | null;
+  model?: string | null;
+  thinkingOptionId?: string | null;
+};
+
+export function createTask(projectId: string, input: TaskPatch = {}): Task {
   const board = loadBoard(projectId);
-  const text = body ?? "";
+  const text = input.body ?? "";
   const task: Task = {
     id: crypto.randomUUID(),
-    title: defaultTitle(title, text, "task"),
+    title: defaultTitle(input.title, text, "task"),
     body: text,
     status: "open",
     openRank: nextOpenRank(board.tasks),
@@ -102,6 +110,9 @@ export function createTask(projectId: string, title?: string, body?: string): Ta
     completedAt: null,
     lastAgentId: null,
     runs: [],
+    provider: input.provider ?? null,
+    model: input.model ?? null,
+    thinkingOptionId: input.thinkingOptionId ?? null,
   };
   board.tasks.push(task);
   saveBoard(board);
@@ -114,7 +125,7 @@ function requireTask(board: BoardFile, taskId: string): Task {
   return task;
 }
 
-export function updateTask(projectId: string, taskId: string, patch: { title?: string; body?: string }): Task {
+export function updateTask(projectId: string, taskId: string, patch: TaskPatch): Task {
   const board = loadBoard(projectId);
   const task = requireTask(board, taskId);
   if (patch.title !== undefined) task.title = defaultTitle(patch.title, patch.body ?? task.body, "task");
@@ -122,6 +133,9 @@ export function updateTask(projectId: string, taskId: string, patch: { title?: s
     task.body = patch.body;
     if (!patch.title && !task.title.trim()) task.title = defaultTitle(undefined, patch.body, "task");
   }
+  if (patch.provider !== undefined) task.provider = patch.provider;
+  if (patch.model !== undefined) task.model = patch.model;
+  if (patch.thinkingOptionId !== undefined) task.thinkingOptionId = patch.thinkingOptionId;
   task.updatedAt = nowIso();
   saveBoard(board);
   return task;

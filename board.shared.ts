@@ -31,6 +31,9 @@ export const publicTaskSchema = z.object({
   completedAt: z.string().nullable(),
   lastAgentId: z.string().nullable(),
   runs: z.array(taskRunSchema),
+  provider: z.string().nullable().default(null),
+  model: z.string().nullable().default(null),
+  thinkingOptionId: z.string().nullable().default(null),
 });
 
 export const workspaceInput = z.object({
@@ -51,6 +54,9 @@ export const createTaskRpc = defineRpc({
   input: workspaceInput.extend({
     title: z.string().optional(),
     body: z.string().optional(),
+    provider: z.string().nullable().optional(),
+    model: z.string().nullable().optional(),
+    thinkingOptionId: z.string().nullable().optional(),
   }),
   output: z.object({ task: publicTaskSchema }),
 });
@@ -61,6 +67,9 @@ export const updateTaskRpc = defineRpc({
     taskId: z.string(),
     title: z.string().optional(),
     body: z.string().optional(),
+    provider: z.string().nullable().optional(),
+    model: z.string().nullable().optional(),
+    thinkingOptionId: z.string().nullable().optional(),
   }),
   output: z.object({ task: publicTaskSchema }),
 });

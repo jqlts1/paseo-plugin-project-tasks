@@ -10,7 +10,13 @@ export type ComposerDraft = {
 };
 
 export type ComposerSubmission = {
-  create: { title?: string; body?: string };
+  create: {
+    title?: string;
+    body?: string;
+    provider?: string | null;
+    model?: string | null;
+    thinkingOptionId?: string | null;
+  };
   images: ComposerImagePayload[];
 };
 
