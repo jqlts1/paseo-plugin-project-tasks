@@ -16,6 +16,7 @@ export type ComposerSubmission = {
     provider?: string | null;
     model?: string | null;
     thinkingOptionId?: string | null;
+    modeId?: string | null;
   };
   images: ComposerImagePayload[];
 };

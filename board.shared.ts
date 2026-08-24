@@ -34,6 +34,7 @@ export const publicTaskSchema = z.object({
   provider: z.string().nullable().default(null),
   model: z.string().nullable().default(null),
   thinkingOptionId: z.string().nullable().default(null),
+  modeId: z.string().nullable().default(null),
 });
 
 export const workspaceInput = z.object({
@@ -57,6 +58,7 @@ export const createTaskRpc = defineRpc({
     provider: z.string().nullable().optional(),
     model: z.string().nullable().optional(),
     thinkingOptionId: z.string().nullable().optional(),
+    modeId: z.string().nullable().optional(),
   }),
   output: z.object({ task: publicTaskSchema }),
 });
@@ -70,6 +72,7 @@ export const updateTaskRpc = defineRpc({
     provider: z.string().nullable().optional(),
     model: z.string().nullable().optional(),
     thinkingOptionId: z.string().nullable().optional(),
+    modeId: z.string().nullable().optional(),
   }),
   output: z.object({ task: publicTaskSchema }),
 });

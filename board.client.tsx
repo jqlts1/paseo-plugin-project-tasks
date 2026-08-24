@@ -37,6 +37,7 @@ type CreateInput = {
   provider?: string | null;
   model?: string | null;
   thinkingOptionId?: string | null;
+  modeId?: string | null;
 };
 type StatusInput = { taskId: string; status: "open" | "done" };
 type UndoDone = { taskId: string; title: string };
@@ -54,10 +55,19 @@ type RunModel = {
   defaultThinkingOptionId?: string | null;
 };
 
+type RunMode = { id: string; label: string };
+
+type ProviderPack = {
+  provider: string;
+  defaultModeId?: string | null;
+  modes: RunMode[];
+};
+
 let lastRun = {
   provider: "omp" as string | null,
   model: "xai-oauth/grok-4.6" as string | null,
   thinkingOptionId: null as string | null,
+  modeId: "full" as string | null,
 };
 
 export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelProps) {
@@ -582,10 +592,12 @@ function TaskComposer({
   const [localSubmitting, setLocalSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [models, setModels] = useState<RunModel[]>([]);
+  const [packs, setPacks] = useState<ProviderPack[]>([]);
   const [provider, setProvider] = useState(lastRun.provider);
   const [model, setModel] = useState(lastRun.model);
   const [thinkingOptionId, setThinkingOptionId] = useState(lastRun.thinkingOptionId);
-  const [menu, setMenu] = useState<null | "model" | "thinking">(null);
+  const [modeId, setModeId] = useState(lastRun.modeId);
+  const [menu, setMenu] = useState<null | "model" | "thinking" | "mode">(null);
   const titleRef = useRef<TextInput>(null);
   const submitRef = useRef<() => void>(() => {});
   const escapeArmedRef = useRef(false);
@@ -593,8 +605,29 @@ function TaskComposer({
   const hint = withAlpha(c.foreground, 0.38);
   const busy = submitting || localSubmitting;
   const hasDraft = Boolean(title.trim() || body.trim() || images.length);
-  const selectedModel = models.find((item) => item.id === model && item.provider === provider) ?? models.find((item) => item.id === model);
+  const selectedModel =
+    models.find((item) => item.id === model && item.provider === provider) ?? models.find((item) => item.id === model);
   const thinkingOptions = selectedModel?.thinkingOptions ?? [];
+  const selectedPack = packs.find((pack) => pack.provider === (selectedModel?.provider ?? provider));
+  const modes = selectedPack?.modes ?? [];
+  const selectedMode = modes.find((item) => item.id === modeId) ?? modes[0];
+
+  const applyModel = (item: RunModel, packList: ProviderPack[] = packs) => {
+    const pack = packList.find((entry) => entry.provider === item.provider);
+    setProvider(item.provider);
+    setModel(item.id);
+    setThinkingOptionId(
+      item.defaultThinkingOptionId ?? item.thinkingOptions.find((option) => option.isDefault)?.id ?? item.thinkingOptions[0]?.id ?? null,
+    );
+    const nextMode =
+      (lastRun.modeId && pack?.modes.some((mode) => mode.id === lastRun.modeId) ? lastRun.modeId : null) ??
+      pack?.defaultModeId ??
+      pack?.modes.find((mode) => mode.id === "full")?.id ??
+      pack?.modes[0]?.id ??
+      null;
+    setModeId(nextMode);
+    setMenu(null);
+  };
 
   const addImages = async (payloads: ComposerImagePayload[]) => {
     const allowed = payloads.filter(
@@ -613,15 +646,10 @@ function TaskComposer({
     if (!submission) return;
     setLocalSubmitting(true);
     setError(null);
-    lastRun = { provider, model, thinkingOptionId };
+    lastRun = { provider, model, thinkingOptionId, modeId };
     try {
       const result = await onSubmit({
-        create: {
-          ...submission.create,
-          provider,
-          model,
-          thinkingOptionId,
-        },
+        create: { ...submission.create, provider, model, thinkingOptionId, modeId },
         images: submission.images,
       });
       setTitle("");
@@ -658,24 +686,34 @@ function TaskComposer({
     let cancelled = false;
     void paseo.providers
       .snapshot()
-      .then((snap: { entries?: Array<{
-        provider: string;
-        enabled?: boolean;
-        models?: Array<{
-          id: string;
-          label: string;
-          isSelectable?: boolean;
-          defaultThinkingOptionId?: string;
-          thinkingOptions?: Array<{ id: string; label: string; isDefault?: boolean }>;
+      .then((snap: {
+        entries?: Array<{
+          provider: string;
+          enabled?: boolean;
+          defaultModeId?: string | null;
+          modes?: Array<{ id: string; label?: string }>;
+          models?: Array<{
+            id: string;
+            label: string;
+            isSelectable?: boolean;
+            defaultThinkingOptionId?: string;
+            thinkingOptions?: Array<{ id: string; label: string; isDefault?: boolean }>;
+          }>;
         }>;
-      }> }) => {
+      }) => {
         if (cancelled) return;
-        const next: RunModel[] = [];
+        const nextModels: RunModel[] = [];
+        const nextPacks: ProviderPack[] = [];
         for (const entry of snap.entries ?? []) {
           if (entry.enabled === false) continue;
+          nextPacks.push({
+            provider: entry.provider,
+            defaultModeId: entry.defaultModeId,
+            modes: (entry.modes ?? []).map((mode) => ({ id: mode.id, label: mode.label ?? mode.id })),
+          });
           for (const item of entry.models ?? []) {
             if (item.isSelectable === false) continue;
-            next.push({
+            nextModels.push({
               provider: entry.provider,
               id: item.id,
               label: item.label,
@@ -688,20 +726,13 @@ function TaskComposer({
             });
           }
         }
-        setModels(next);
+        setModels(nextModels);
+        setPacks(nextPacks);
         const preferred =
-          next.find((item) => item.id === lastRun.model && item.provider === lastRun.provider) ??
-          next.find((item) => item.id.includes("grok-4.6")) ??
-          next[0];
-        if (preferred) {
-          setProvider(preferred.provider);
-          setModel(preferred.id);
-          const thinking =
-            lastRun.thinkingOptionId && preferred.thinkingOptions.some((option) => option.id === lastRun.thinkingOptionId)
-              ? lastRun.thinkingOptionId
-              : preferred.defaultThinkingOptionId ?? preferred.thinkingOptions.find((option) => option.isDefault)?.id ?? preferred.thinkingOptions[0]?.id ?? null;
-          setThinkingOptionId(thinking);
-        }
+          nextModels.find((item) => item.id === lastRun.model && item.provider === lastRun.provider) ??
+          nextModels.find((item) => item.id.includes("grok-4.6")) ??
+          nextModels[0];
+        if (preferred) applyModel(preferred, nextPacks);
       })
       .catch(() => {});
     return () => {
@@ -719,6 +750,10 @@ function TaskComposer({
       }
       if (event.key !== "Escape") return;
       event.preventDefault();
+      if (menu) {
+        setMenu(null);
+        return;
+      }
       if (hasDraft && !escapeArmedRef.current) {
         escapeArmedRef.current = true;
         (document.activeElement as HTMLElement | null)?.blur?.();
@@ -729,12 +764,10 @@ function TaskComposer({
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [expanded, hasDraft]);
+  }, [expanded, hasDraft, menu]);
 
   const line = withAlpha(c.foregroundMuted, 0.28);
-  const field = {
-    borderWidth: 0,
-  };
+  const field = { borderWidth: 0 };
   const styles = {
     collapsed: {
       minHeight: 48,
@@ -795,17 +828,10 @@ function TaskComposer({
       borderTopWidth: 1,
       borderTopColor: line,
     },
-    tools: { flexDirection: "row" as const, alignItems: "center" as const, flexWrap: "wrap" as const, gap: 6, flexShrink: 1 },
-    imageButton: { minHeight: compact ? 44 : 32, justifyContent: "center" as const, paddingHorizontal: 2 },
-    imageButtonText: { color: c.foregroundMuted, fontSize: 13 },
-    chip: {
-      minHeight: compact ? 32 : 28,
-      paddingHorizontal: 8,
-      borderRadius: 8,
-      justifyContent: "center" as const,
-      backgroundColor: withAlpha(c.foregroundMuted, 0.12),
-    },
-    chipText: { color: c.foreground, fontSize: 12 },
+    tools: { flexDirection: "row" as const, alignItems: "center" as const, flexWrap: "wrap" as const, gap: 10, flexShrink: 1 },
+    ghost: { minHeight: compact ? 36 : 28, justifyContent: "center" as const },
+    ghostText: { color: c.foregroundMuted, fontSize: 13 },
+    ghostOn: { color: c.foreground, fontSize: 13 },
     menu: {
       maxHeight: 180,
       borderWidth: 1,
@@ -901,7 +927,7 @@ function TaskComposer({
           <View style={styles.tools}>
             <Pressable
               accessibilityRole="button"
-              style={styles.imageButton}
+              style={styles.ghost}
               disabled={images.length >= 3 || busy}
               onPress={async () => {
                 try {
@@ -912,26 +938,35 @@ function TaskComposer({
                 }
               }}
             >
-              <Text style={styles.imageButtonText}>＋ 图片 {images.length}/3</Text>
+              <Text style={styles.ghostOn}>＋{images.length > 0 ? ` ${images.length}` : ""}</Text>
             </Pressable>
             <Pressable
               accessibilityRole="button"
-              style={styles.chip}
+              style={styles.ghost}
               onPress={() => setMenu((current) => (current === "model" ? null : "model"))}
             >
-              <Text style={styles.chipText} numberOfLines={1}>
-                {selectedModel?.label ?? model ?? "选择模型"}
+              <Text style={styles.ghostOn} numberOfLines={1}>
+                {selectedModel?.label ?? model ?? "模型"}
               </Text>
             </Pressable>
             {thinkingOptions.length > 0 ? (
               <Pressable
                 accessibilityRole="button"
-                style={styles.chip}
+                style={styles.ghost}
                 onPress={() => setMenu((current) => (current === "thinking" ? null : "thinking"))}
               >
-                <Text style={styles.chipText}>
+                <Text style={styles.ghostText}>
                   {thinkingOptions.find((option) => option.id === thinkingOptionId)?.label ?? "思考"}
                 </Text>
+              </Pressable>
+            ) : null}
+            {modes.length > 0 ? (
+              <Pressable
+                accessibilityRole="button"
+                style={styles.ghost}
+                onPress={() => setMenu((current) => (current === "mode" ? null : "mode"))}
+              >
+                <Text style={styles.ghostText}>{selectedMode?.label ?? "模式"}</Text>
               </Pressable>
             ) : null}
           </View>
@@ -941,6 +976,7 @@ function TaskComposer({
               style={styles.cancel}
               onPress={() => {
                 setExpanded(false);
+                setMenu(null);
                 escapeArmedRef.current = false;
               }}
             >
@@ -957,14 +993,7 @@ function TaskComposer({
               <Pressable
                 key={`${item.provider}:${item.id}`}
                 style={[styles.menuRow, item.id === model ? styles.menuRowOn : null]}
-                onPress={() => {
-                  setProvider(item.provider);
-                  setModel(item.id);
-                  setThinkingOptionId(
-                    item.defaultThinkingOptionId ?? item.thinkingOptions.find((option) => option.isDefault)?.id ?? item.thinkingOptions[0]?.id ?? null,
-                  );
-                  setMenu(null);
-                }}
+                onPress={() => applyModel(item)}
               >
                 <Text style={styles.menuText}>{item.label}</Text>
                 <Text style={styles.menuMuted}>{item.provider}</Text>
@@ -984,6 +1013,22 @@ function TaskComposer({
                 }}
               >
                 <Text style={styles.menuText}>{option.label}</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        ) : null}
+        {menu === "mode" ? (
+          <ScrollView style={styles.menu} keyboardShouldPersistTaps="handled">
+            {modes.map((item) => (
+              <Pressable
+                key={item.id}
+                style={[styles.menuRow, item.id === modeId ? styles.menuRowOn : null]}
+                onPress={() => {
+                  setModeId(item.id);
+                  setMenu(null);
+                }}
+              >
+                <Text style={styles.menuText}>{item.label}</Text>
               </Pressable>
             ))}
           </ScrollView>
@@ -1328,6 +1373,7 @@ function optimisticTask(tasks: PublicTask[], input: CreateInput, id: string): Pu
     provider: input.provider ?? null,
     model: input.model ?? null,
     thinkingOptionId: input.thinkingOptionId ?? null,
+    modeId: input.modeId ?? null,
   };
 }
 

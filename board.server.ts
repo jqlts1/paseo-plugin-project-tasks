@@ -50,6 +50,7 @@ export async function createTask(
     provider: input.provider,
     model: input.model,
     thinkingOptionId: input.thinkingOptionId,
+    modeId: input.modeId,
   });
   return { task: publish(projectId, task) };
 }
@@ -65,6 +66,7 @@ export async function updateTask(
     provider: input.provider,
     model: input.model,
     thinkingOptionId: input.thinkingOptionId,
+    modeId: input.modeId,
   });
   return { task: publish(projectId, task) };
 }

@@ -93,6 +93,7 @@ export type TaskPatch = {
   provider?: string | null;
   model?: string | null;
   thinkingOptionId?: string | null;
+  modeId?: string | null;
 };
 
 export function createTask(projectId: string, input: TaskPatch = {}): Task {
@@ -113,6 +114,7 @@ export function createTask(projectId: string, input: TaskPatch = {}): Task {
     provider: input.provider ?? null,
     model: input.model ?? null,
     thinkingOptionId: input.thinkingOptionId ?? null,
+    modeId: input.modeId ?? null,
   };
   board.tasks.push(task);
   saveBoard(board);
@@ -136,6 +138,7 @@ export function updateTask(projectId: string, taskId: string, patch: TaskPatch):
   if (patch.provider !== undefined) task.provider = patch.provider;
   if (patch.model !== undefined) task.model = patch.model;
   if (patch.thinkingOptionId !== undefined) task.thinkingOptionId = patch.thinkingOptionId;
+  if (patch.modeId !== undefined) task.modeId = patch.modeId;
   task.updatedAt = nowIso();
   saveBoard(board);
   return task;
