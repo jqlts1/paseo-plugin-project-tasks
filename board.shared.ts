@@ -133,4 +133,14 @@ export const readImageRpc = defineRpc({
   }),
 });
 
+export const recordRunRpc = defineRpc({
+  name: "tasks.record-run",
+  input: workspaceInput.extend({
+    taskId: z.string(),
+    agentId: z.string(),
+    promptPreview: z.string(),
+  }),
+  output: z.object({ task: publicTaskSchema }),
+});
+
 export type PublicTask = z.infer<typeof publicTaskSchema>;

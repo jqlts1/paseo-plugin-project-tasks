@@ -19,6 +19,7 @@ import {
   createTaskRpc,
   getBoardRpc,
   readImageRpc,
+  recordRunRpc,
   removeImageRpc,
   removeTaskRpc,
   reorderOpenRpc,
@@ -27,6 +28,7 @@ import {
   type PublicTask,
 } from "./board.shared";
 import { prepareComposerSubmission, type ComposerImagePayload, type ComposerSubmission } from "./composer-draft";
+import { prepareExecuteRequest, previewPrompt } from "./execute-run";
 import {
   buildRunnableCatalog,
   catalogSnapshotFromUnknown,
@@ -71,10 +73,12 @@ let lastRun = {
 
 export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelProps) {
   const workspace = useWorkspace(workspaceId, ({ name, directory }) => ({ name, directory }));
+  const paseo = usePaseo();
   const queryClient = useQueryClient();
   const getBoard = useRpc(getBoardRpc);
   const createTask = useRpc(createTaskRpc);
   const updateTask = useRpc(updateTaskRpc);
+  const recordRun = useRpc(recordRunRpc);
   const setStatus = useRpc(setStatusRpc);
   const reorderOpen = useRpc(reorderOpenRpc);
   const removeTask = useRpc(removeTaskRpc);
@@ -84,6 +88,7 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
   const [screen, setScreen] = useState<Screen>({ name: "list" });
   const [showDone, setShowDone] = useState(false);
   const [pickError, setPickError] = useState<string | null>(null);
+  const [executingId, setExecutingId] = useState<string | null>(null);
   const [undo, setUndo] = useState<UndoDone | null>(null);
   const undoTimerRef = useRef<TimerId>(0);
   const compact = layout.compact;
@@ -279,6 +284,68 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
     }
   };
 
+
+  const executeTask = async (task: PublicTask) => {
+    if (executingId) return;
+    setExecutingId(task.id);
+    setPickError(null);
+    try {
+      const options = workspace?.directory ? { cwd: workspace.directory } : undefined;
+      const snap =
+        (await paseo.providers.waitForReady(options).catch(() => null)) ??
+        (await paseo.providers.snapshot(options));
+      const parsed = catalogSnapshotFromUnknown(snap);
+      const entries = [];
+      for (const entry of parsed.entries ?? []) {
+        if (entry.status !== "ready") {
+          entries.push(entry);
+          continue;
+        }
+        if ((entry.models ?? []).length > 0) {
+          entries.push(entry);
+          continue;
+        }
+        try {
+          const extra = await paseo.providers.listModels(entry.provider, options);
+          entries.push({ ...entry, models: extra.models ?? [] });
+        } catch {
+          entries.push(entry);
+        }
+      }
+      const request = prepareExecuteRequest({
+        task,
+        catalog: buildRunnableCatalog({ entries }),
+      });
+      if (!request.ok) throw new Error(request.error);
+      const images = [];
+      for (const imageId of request.imageIds) {
+        const image = await readImage({ workspaceId, taskId: task.id, imageId });
+        images.push({ data: image.dataBase64, mimeType: image.mime });
+      }
+      const agent = await paseo.workspaces.ref(workspaceId).agents.create({
+        title: task.title,
+        config: request.config,
+        prompt: request.prompt,
+        images: images.length > 0 ? images : undefined,
+        labels: { "project-tasks": task.id },
+      });
+      const recorded = await recordRun({
+        workspaceId,
+        taskId: task.id,
+        agentId: agent.id,
+        promptPreview: previewPrompt(request.prompt),
+      });
+      queryClient.setQueryData<BoardData>(boardKey, (current) =>
+        current
+          ? { ...current, tasks: current.tasks.map((item) => (item.id === recorded.task.id ? recorded.task : item)) }
+          : current,
+      );
+    } catch (error) {
+      showError(error);
+    } finally {
+      setExecutingId(null);
+    }
+  };
   const submitComposer = async (submission: ComposerSubmission): Promise<{ warning?: string }> => {
     setPickError(null);
     const created = await createMut.mutateAsync(submission.create);
@@ -356,6 +423,7 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
       stepper: { flexDirection: "row" as const, gap: 4, paddingTop: 1 },
       step: { paddingHorizontal: 6, paddingVertical: 2 },
       stepText: { color: c.foregroundMuted, fontSize: 16 },
+      runText: { color: c.accent, fontSize: 13, paddingTop: 2 },
       undoBar: {
         flexDirection: "row" as const,
         alignItems: "center" as const,
@@ -401,7 +469,7 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
         placeholderColor={withAlpha(c.foreground, 0.38)}
         workspaceId={workspaceId}
         readImage={readImage}
-        busy={addImageMut.isPending || updateMut.isPending || removeMut.isPending}
+        busy={addImageMut.isPending || updateMut.isPending || removeMut.isPending || executingId === selected.id}
         error={pickError ?? asMessage(addImageMut.error) ?? asMessage(updateMut.error) ?? asMessage(removeMut.error)}
         onBack={() => setScreen({ name: "list" })}
         onSave={(patch) => updateMut.mutate({ taskId: selected.id, ...patch })}
@@ -411,6 +479,7 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
           if (status === "done") setScreen({ name: "list" });
         }}
         onRemove={() => removeMut.mutate(selected.id)}
+        onExecute={(draft) => void executeTask({ ...selected, ...draft })}
         onPick={async () => {
           try {
             setPickError(null);
@@ -496,6 +565,17 @@ export function TasksPanel({ theme, layout, workspaceId }: PluginWorkspacePanelP
                 </Text>
               ) : null}
               {task.images.length > 0 ? <Text style={styles.preview}>图 {task.images.length}</Text> : null}
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="执行任务"
+              disabled={executingId !== null}
+              onPress={() => {
+                if (reorder.blocked) return;
+                void executeTask(task);
+              }}
+            >
+              <Text style={styles.runText}>{executingId === task.id ? "执行中…" : "执行"}</Text>
             </Pressable>
             {compact ? (
               <View style={styles.stepper}>
@@ -1105,6 +1185,7 @@ function TaskDetail({
   onSave,
   onStatus,
   onRemove,
+  onExecute,
   onPick,
   onPaste,
   onRemoveImage,
@@ -1124,6 +1205,7 @@ function TaskDetail({
   onSave: (patch: { title?: string; body?: string }) => void;
   onStatus: (status: "open" | "done") => void;
   onRemove: () => void;
+  onExecute: (draft: { title: string; body: string }) => void;
   onPick: () => void;
   onPaste: (files: Array<{ mime: string; dataBase64: string }>) => void;
   onRemoveImage: (imageId: string) => void;
@@ -1148,31 +1230,15 @@ function TaskDetail({
   const flush = useCallback(() => {
     clearTimeout(timerRef.current);
     timerRef.current = 0;
-    const current = taskRef.current;
-    const nextTitle = titleRef.current.trim();
-    const sent = lastSentRef.current;
-    const resolvedTitle = nextTitle || current.title;
-    const titleChanged = resolvedTitle !== sent.title && (nextTitle.length > 0 || current.title.length > 0);
-    const bodyChanged = bodyRef.current !== sent.body;
-    if (!titleChanged && !bodyChanged) return;
-    const patch = {
-      ...(titleChanged ? { title: resolvedTitle } : {}),
-      ...(bodyChanged ? { body: bodyRef.current } : {}),
-    };
-    lastSentRef.current = {
-      title: titleChanged ? resolvedTitle : sent.title,
-      body: bodyChanged ? bodyRef.current : sent.body,
-    };
-    onSaveRef.current(patch);
+    const next = { title: titleRef.current, body: bodyRef.current };
+    if (next.title === lastSentRef.current.title && next.body === lastSentRef.current.body) return;
+    lastSentRef.current = next;
+    onSaveRef.current(next);
   }, []);
-
-  const scheduleSave = useCallback(() => {
+  const scheduleSave = () => {
     clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => {
-      timerRef.current = 0;
-      flush();
-    }, SAVE_DEBOUNCE_MS);
-  }, [flush]);
+    timerRef.current = setTimeout(flush, SAVE_DEBOUNCE_MS);
+  };
 
   useEffect(() => {
     setTitle(task.title);
@@ -1308,6 +1374,17 @@ function TaskDetail({
           })}
         </View>
         <View style={styles.actions}>
+          <Pressable
+            accessibilityRole="button"
+            style={styles.button}
+            disabled={busy}
+            onPress={() => {
+              flush();
+              onExecute({ title: titleRef.current, body: bodyRef.current });
+            }}
+          >
+            <Text style={styles.buttonText}>{busy ? "处理中…" : "执行"}</Text>
+          </Pressable>
           <Pressable accessibilityRole="button" style={styles.button} onPress={onPick} disabled={busy || task.images.length >= 3}>
             <Text style={styles.buttonText}>{busy ? "处理中…" : "添加图片"}</Text>
           </Pressable>

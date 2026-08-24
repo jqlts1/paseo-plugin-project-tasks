@@ -5,6 +5,7 @@ import {
   createTask,
   getBoard,
   readImage,
+  recordRun,
   removeImage,
   removeTask,
   reorderOpen,
@@ -16,6 +17,7 @@ import {
   createTaskRpc,
   getBoardRpc,
   readImageRpc,
+  recordRunRpc,
   removeImageRpc,
   removeTaskRpc,
   reorderOpenRpc,
@@ -27,6 +29,7 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(getBoardRpc, getBoard);
   plugin.handle(createTaskRpc, createTask);
   plugin.handle(updateTaskRpc, updateTask);
+  plugin.handle(recordRunRpc, recordRun);
   plugin.handle(setStatusRpc, setStatus);
   plugin.handle(reorderOpenRpc, reorderOpen);
   plugin.handle(removeTaskRpc, removeTask);

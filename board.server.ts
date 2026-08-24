@@ -6,6 +6,7 @@ import {
   getBoardRpc,
   publicTaskSchema,
   readImageRpc,
+  recordRunRpc,
   removeImageRpc,
   removeTaskRpc,
   reorderOpenRpc,
@@ -67,6 +68,18 @@ export async function updateTask(
     model: input.model,
     thinkingOptionId: input.thinkingOptionId,
     modeId: input.modeId,
+  });
+  return { task: publish(projectId, task) };
+}
+
+export async function recordRun(
+  input: ZodOutput<typeof recordRunRpc.input>,
+  { paseo }: PluginHandlerContext,
+) {
+  const projectId = await projectIdOf(input.workspaceId, paseo);
+  const task = store.recordRun(projectId, input.taskId, {
+    agentId: input.agentId,
+    promptPreview: input.promptPreview,
   });
   return { task: publish(projectId, task) };
 }

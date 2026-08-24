@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test composer-draft.test.ts paseo-catalog.test.ts"
+    "test": "tsx --test composer-draft.test.ts paseo-catalog.test.ts execute-run.test.ts"
   },
   "devDependencies": {
     "@getpaseo/client": "^0.4.0",

@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { boardPath, imagePath, imagesDir, projectDir } from "./paths.server";
 import type { PublicTask } from "./board.shared";
+import { applyTaskRun } from "./execute-run";
 
 export type TaskImage = PublicTask["images"][number];
 export type Task = PublicTask;
@@ -140,6 +141,25 @@ export function updateTask(projectId: string, taskId: string, patch: TaskPatch):
   if (patch.thinkingOptionId !== undefined) task.thinkingOptionId = patch.thinkingOptionId;
   if (patch.modeId !== undefined) task.modeId = patch.modeId;
   task.updatedAt = nowIso();
+  saveBoard(board);
+  return task;
+}
+
+export function recordRun(
+  projectId: string,
+  taskId: string,
+  input: { agentId: string; promptPreview: string },
+): Task {
+  const board = loadBoard(projectId);
+  const task = requireTask(board, taskId);
+  Object.assign(
+    task,
+    applyTaskRun(task, {
+      agentId: input.agentId,
+      createdAt: nowIso(),
+      promptPreview: input.promptPreview,
+    }),
+  );
   saveBoard(board);
   return task;
 }
